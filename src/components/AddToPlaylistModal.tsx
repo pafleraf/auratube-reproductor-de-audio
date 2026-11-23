@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { FolderPlus, Check, Plus, X, ListMusic } from 'lucide-react';
 import { Playlist, Track } from '../types';
 
@@ -20,7 +21,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [showNewForm, setShowNewForm] = useState(playlists.length === 0);
 
-  if (!track) return null;
+  if (!track || typeof document === 'undefined') return null;
 
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault();
@@ -31,13 +32,13 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
     onClose();
   };
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm p-3 sm:p-4"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-2.5 sm:p-4 overflow-y-auto"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md rounded-2xl bg-[#12151E] border border-white/10 p-5 shadow-2xl text-slate-100"
+        className="w-full max-w-md max-h-[92dvh] overflow-y-auto custom-scroll rounded-2xl bg-[#12151E] border border-white/15 p-4 sm:p-5 shadow-2xl text-slate-100 my-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between pb-3 border-b border-white/10">
@@ -130,6 +131,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
           </form>
         )}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };
