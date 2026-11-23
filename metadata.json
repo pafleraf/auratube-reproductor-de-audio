@@ -1,0 +1,6 @@
+{
+  "name": "AuraTube — Reproductor de Audio YouTube en Segundo Plano",
+  "description": "Reproductor web minimalista en modo oscuro para escuchar enlaces de YouTube en segundo plano en Android e iOS con controles en la barra de notificaciones, listas de reproducción e historial.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
