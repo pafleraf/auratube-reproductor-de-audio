@@ -68,18 +68,18 @@ export const PWAInstallButton: React.FC = () => {
         typeof document !== 'undefined' &&
         createPortal(
           <div
-            className="pwa-modal-backdrop bg-black/80 backdrop-blur-sm"
+            className="pwa-modal-backdrop fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-sm"
             onClick={() => setShowGuide(false)}
             role="dialog"
             aria-modal="true"
             aria-labelledby="pwa-guide-title"
           >
             <div
-              className="pwa-modal-card rounded-2xl bg-[#12151E] border border-white/15 shadow-2xl text-slate-100"
+              className="pwa-modal-card relative flex flex-col w-full rounded-2xl bg-[#12151E] border border-white/15 shadow-2xl text-slate-100 overflow-hidden"
               onClick={(e) => e.stopPropagation()}
             >
               {/* Fixed Modal Header */}
-              <div className="pwa-modal-header border-b border-white/10 flex items-center justify-between gap-2 shrink-0 bg-[#090A0F]/70">
+              <div className="pwa-modal-header border-b border-white/10 flex items-center justify-between gap-2 shrink-0 bg-[#090A0F]/80">
                 <div className="flex items-center gap-2 min-w-0">
                   <div className="w-7 h-7 rounded-lg bg-amber-500/15 border border-amber-500/30 flex items-center justify-center shrink-0">
                     <Smartphone className="w-4 h-4 text-amber-400" />
@@ -102,7 +102,7 @@ export const PWAInstallButton: React.FC = () => {
               </div>
 
               {/* Responsive Scrollable Body (Adapts to Portrait & Short Landscape Viewports) */}
-              <div className="pwa-modal-body custom-scroll text-xs text-slate-300">
+              <div className="pwa-modal-body custom-scroll flex-1 min-h-0 overflow-y-auto text-xs text-slate-300">
                 <p className="text-[11px] sm:text-xs text-slate-300 leading-snug">
                   Instala la webapp en tu pantalla de inicio para mantener el{' '}
                   <strong className="text-amber-400 font-semibold">
@@ -161,7 +161,7 @@ export const PWAInstallButton: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-200">
+                <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-200 shrink-0">
                   <CheckCircle2 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                   <span className="leading-tight">
                     Ábrela desde el nuevo icono en tu móvil para pantalla completa sin barras del navegador.
@@ -170,7 +170,7 @@ export const PWAInstallButton: React.FC = () => {
               </div>
 
               {/* Fixed Modal Footer */}
-              <div className="pwa-modal-footer border-t border-white/10 bg-[#090A0F]/70 shrink-0">
+              <div className="pwa-modal-footer border-t border-white/10 bg-[#090A0F]/80 shrink-0">
                 <button
                   type="button"
                   onClick={() => setShowGuide(false)}

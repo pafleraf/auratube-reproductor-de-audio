@@ -3,6 +3,7 @@ import React, { useEffect, useRef } from 'react';
 interface YTPlayer {
   playVideo: () => void;
   pauseVideo: () => void;
+  stopVideo?: () => void;
   seekTo: (seconds: number, allowSeekAhead: boolean) => void;
   loadVideoById: (options: { videoId: string; startSeconds?: number }) => void;
   cueVideoById: (options: { videoId: string; startSeconds?: number }) => void;
@@ -71,13 +72,76 @@ export const YouTubeAudioBridge: React.FC<YouTubeAudioBridgeProps> = ({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const playerRef = useRef<YTPlayer | null>(null);
   const isReadyRef = useRef(false);
-  const currentVideoIdRef = useRef(videoId);
+
+  // desiredVideoIdRef always tracks the latest videoId prop from React state
+  const desiredVideoIdRef = useRef(videoId);
+  // loadedVideoIdRef tracks the videoId actually loaded/cued inside the YT.Player instance
+  const loadedVideoIdRef = useRef('');
+
   const isPlayingRef = useRef(isPlaying);
+  const playbackRateRef = useRef(playbackRate);
+  const isMutedRef = useRef(isMuted);
+  const volumeRef = useRef(volume);
+  const pendingStartSecRef = useRef(0);
   const bridgeActiveRef = useRef(false);
+
+  useEffect(() => {
+    desiredVideoIdRef.current = videoId;
+  }, [videoId]);
 
   useEffect(() => {
     isPlayingRef.current = isPlaying;
   }, [isPlaying]);
+
+  useEffect(() => {
+    playbackRateRef.current = playbackRate;
+  }, [playbackRate]);
+
+  useEffect(() => {
+    isMutedRef.current = isMuted;
+    volumeRef.current = volume;
+  }, [isMuted, volume]);
+
+  // Helper to synchronize the YT.Player instance with desiredVideoIdRef & isPlayingRef
+  const syncPlayerToDesiredVideo = (p: YTPlayer, forceReload = false) => {
+    const targetId = desiredVideoIdRef.current;
+    if (!targetId) return;
+
+    const needsVideoSwitch = forceReload || loadedVideoIdRef.current !== targetId;
+    if (needsVideoSwitch) {
+      const startSec = pendingStartSecRef.current > 0 ? pendingStartSecRef.current : 0;
+      pendingStartSecRef.current = 0;
+      loadedVideoIdRef.current = targetId;
+
+      try {
+        p.pauseVideo();
+      } catch {
+        // ignore
+      }
+
+      try {
+        if (isPlayingRef.current) {
+          p.loadVideoById({ videoId: targetId, startSeconds: startSec });
+        } else {
+          p.cueVideoById({ videoId: targetId, startSeconds: startSec });
+        }
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    try {
+      const state = p.getPlayerState?.();
+      if (isPlayingRef.current && state !== 1) {
+        p.playVideo();
+      } else if (!isPlayingRef.current && state === 1) {
+        p.pauseVideo();
+      }
+    } catch {
+      // ignore
+    }
+  };
 
   // Load YouTube IFrame API script once
   useEffect(() => {
@@ -86,12 +150,15 @@ export const YouTubeAudioBridge: React.FC<YouTubeAudioBridgeProps> = ({
     const initPlayer = () => {
       if (!containerRef.current || !window.YT?.Player || playerRef.current) return;
 
+      const initialVid = desiredVideoIdRef.current;
+      loadedVideoIdRef.current = initialVid;
+
       playerRef.current = new window.YT.Player(containerRef.current, {
         width: 1,
         height: 1,
-        videoId: currentVideoIdRef.current,
+        videoId: initialVid,
         playerVars: {
-          autoplay: isPlayingRef.current ? 1 : 0,
+          autoplay: 0,
           controls: 0,
           disablekb: 1,
           fs: 0,
@@ -103,23 +170,45 @@ export const YouTubeAudioBridge: React.FC<YouTubeAudioBridgeProps> = ({
         events: {
           onReady: (e) => {
             isReadyRef.current = true;
-            e.target.setVolume(Math.round(volume * 100));
-            if (isMuted) e.target.mute();
-            else e.target.unMute();
             try {
-              e.target.setPlaybackRate(playbackRate);
+              e.target.setVolume(Math.round(volumeRef.current * 100));
+              if (isMutedRef.current) e.target.mute();
+              else e.target.unMute();
+              e.target.setPlaybackRate(playbackRateRef.current);
             } catch {
               // ignore
             }
-            if (isPlayingRef.current) {
-              e.target.playVideo();
-            }
+            // If user loaded a new video before onReady completed, switch immediately to desiredVideoIdRef
+            syncPlayerToDesiredVideo(e.target, loadedVideoIdRef.current !== desiredVideoIdRef.current);
           },
           onStateChange: (e) => {
-            // 1 = PLAYING, 2 = PAUSED, 0 = ENDED, 3 = BUFFERING
+            // Guard: if the player ever starts playing a stale videoId, switch immediately to desiredVideoIdRef
+            if (
+              desiredVideoIdRef.current &&
+              loadedVideoIdRef.current !== desiredVideoIdRef.current
+            ) {
+              syncPlayerToDesiredVideo(e.target, true);
+              return;
+            }
+
+            // 1 = PLAYING, 2 = PAUSED, 0 = ENDED, 3 = BUFFERING, 5 = CUED
             if (e.data === 1) {
+              if (!isPlayingRef.current) {
+                try {
+                  e.target.pauseVideo();
+                } catch {
+                  // ignore
+                }
+                return;
+              }
               bridgeActiveRef.current = true;
               onBridgeActiveChange(true);
+              const dur = e.target.getDuration?.() || 0;
+              const cur = e.target.getCurrentTime?.() || 0;
+              if (dur > 0) {
+                onTimeProgress(cur, dur);
+              }
+            } else if (e.data === 2 || e.data === 5) {
               const dur = e.target.getDuration?.() || 0;
               const cur = e.target.getCurrentTime?.() || 0;
               if (dur > 0) {
@@ -162,6 +251,13 @@ export const YouTubeAudioBridge: React.FC<YouTubeAudioBridgeProps> = ({
       const p = playerRef.current;
       if (p && isReadyRef.current && bridgeActiveRef.current && isPlayingRef.current) {
         try {
+          if (
+            desiredVideoIdRef.current &&
+            loadedVideoIdRef.current !== desiredVideoIdRef.current
+          ) {
+            syncPlayerToDesiredVideo(p, true);
+            return;
+          }
           const state = p.getPlayerState?.();
           if (state === 1) {
             const cur = p.getCurrentTime?.() || 0;
@@ -172,15 +268,20 @@ export const YouTubeAudioBridge: React.FC<YouTubeAudioBridgeProps> = ({
           // ignore
         }
       }
-    }, 800);
+    }, 700);
 
     // Keep playing when tab visibility changes (background mode on mobile browsers)
     const handleVisibility = () => {
-      if (document.visibilityState === 'hidden' && isPlayingRef.current && playerRef.current && isReadyRef.current) {
+      if (
+        document.visibilityState === 'hidden' &&
+        isPlayingRef.current &&
+        playerRef.current &&
+        isReadyRef.current
+      ) {
         setTimeout(() => {
           try {
-            if (isPlayingRef.current) {
-              playerRef.current?.playVideo();
+            if (isPlayingRef.current && playerRef.current) {
+              syncPlayerToDesiredVideo(playerRef.current, false);
             }
           } catch {
             // ignore
@@ -203,38 +304,14 @@ export const YouTubeAudioBridge: React.FC<YouTubeAudioBridgeProps> = ({
     };
   }, []);
 
-  // React to videoId change
+  // React to videoId or isPlaying change
   useEffect(() => {
-    if (currentVideoIdRef.current === videoId) return;
-    currentVideoIdRef.current = videoId;
+    desiredVideoIdRef.current = videoId;
+    isPlayingRef.current = isPlaying;
     const p = playerRef.current;
     if (!p || !isReadyRef.current || !videoId) return;
-    try {
-      if (isPlaying) {
-        p.loadVideoById({ videoId, startSeconds: 0 });
-      } else {
-        p.cueVideoById({ videoId, startSeconds: 0 });
-      }
-    } catch {
-      // ignore
-    }
+    syncPlayerToDesiredVideo(p, false);
   }, [videoId, isPlaying]);
-
-  // React to play/pause toggle
-  useEffect(() => {
-    const p = playerRef.current;
-    if (!p || !isReadyRef.current) return;
-    try {
-      const state = p.getPlayerState?.();
-      if (isPlaying && state !== 1) {
-        p.playVideo();
-      } else if (!isPlaying && state === 1) {
-        p.pauseVideo();
-      }
-    } catch {
-      // ignore
-    }
-  }, [isPlaying]);
 
   // React to playbackRate change
   useEffect(() => {
@@ -263,10 +340,15 @@ export const YouTubeAudioBridge: React.FC<YouTubeAudioBridgeProps> = ({
   // React to explicit user seek
   useEffect(() => {
     if (!seekTrigger) return;
+    pendingStartSecRef.current = seekTrigger.time;
     const p = playerRef.current;
     if (!p || !isReadyRef.current) return;
     try {
-      p.seekTo(seekTrigger.time, true);
+      if (loadedVideoIdRef.current !== desiredVideoIdRef.current) {
+        syncPlayerToDesiredVideo(p, true);
+      } else {
+        p.seekTo(seekTrigger.time, true);
+      }
     } catch {
       // ignore
     }

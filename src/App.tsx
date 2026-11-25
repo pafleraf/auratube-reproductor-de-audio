@@ -17,9 +17,9 @@ import {
   History,
   Disc3,
   Trash2,
+  GripVertical,
   ArrowUp,
   ArrowDown,
-  ClipboardPaste,
   Loader2,
   FolderPlus,
   Search,
@@ -33,6 +33,8 @@ import {
   UserCheck,
   CheckCheck,
   Cloud,
+  SunDim,
+  Clock,
 } from 'lucide-react';
 import {
   ActiveTab,
@@ -60,20 +62,40 @@ import { GoogleDriveSyncBar } from './components/GoogleDriveSyncBar';
 import { AuraTubeDriveBackup } from './services/googleDriveSync';
 
 const STORAGE_KEYS = {
-  QUEUE: 'auratube_queue_v1',
-  CURRENT_INDEX: 'auratube_current_idx_v1',
-  PLAYLISTS: 'auratube_playlists_v1',
-  HISTORY: 'auratube_history_v1',
+  QUEUE: 'auratube_queue_v2',
+  CURRENT_INDEX: 'auratube_current_idx_v2',
+  PLAYLISTS: 'auratube_playlists_v2',
+  HISTORY: 'auratube_history_v2',
   SPEED: 'auratube_speed_v1',
   POSITIONS: 'auratube_positions_v1',
-  SUBSCRIPTIONS: 'auratube_subscriptions_v1',
-  SEEN_EPISODES: 'auratube_seen_episodes_v1',
+  SUBSCRIPTIONS: 'auratube_subscriptions_v2',
+  SEEN_EPISODES: 'auratube_seen_episodes_v2',
   LAST_CONNECTION: 'auratube_last_connection_v1',
   SPLIT_PCT: 'auratube_split_pct_v1',
   BTN_SCALE: 'auratube_btn_scale_v1',
+  NIGHT_DIM: 'auratube_night_dim_v1',
 };
 
 type ButtonScale = 'sm' | 'md' | 'lg';
+type NightDimMode = 'auto' | 'forced' | 'off';
+
+interface NightDimSettings {
+  mode: NightDimMode;
+  startHour: number;
+  endHour: number;
+  dimLevelPct: number;
+  pureOledBlack: boolean;
+}
+
+function isHourWithinSchedule(currentHour: number, startHour: number, endHour: number): boolean {
+  if (startHour === endHour) return true;
+  if (startHour > endHour) {
+    // Overnight window (e.g., 20:00 to 07:00)
+    return currentHour >= startHour || currentHour < endHour;
+  }
+  // Same-day window (e.g., 01:00 to 06:00)
+  return currentHour >= startHour && currentHour < endHour;
+}
 
 const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 
@@ -206,14 +228,6 @@ export default function App() {
   const rightActiveTab: ActiveTab =
     activeTab === 'player' ? (isMobileLandscape ? 'playlists' : 'queue') : activeTab;
 
-  // Dynamic sizing classes for right panel simplified dimensionable buttons
-  const rTabBtnClass =
-    rightBtnScale === 'sm'
-      ? 'min-h-[28px] px-2 text-[11px] rounded-md'
-      : rightBtnScale === 'lg'
-      ? 'min-h-[40px] px-3.5 text-xs sm:text-sm rounded-xl'
-      : 'min-h-[34px] px-2.5 text-xs rounded-lg';
-
   const rActionBtnClass =
     rightBtnScale === 'sm'
       ? 'min-h-[30px] px-2 text-[11px] rounded-lg'
@@ -235,8 +249,9 @@ export default function App() {
       ? 'w-12 h-12 rounded-xl'
       : 'w-10 h-10 rounded-xl';
 
-  // URL Input state
+  // URL Input & Floating Top-Right Loader Popover state
   const [urlInput, setUrlInput] = useState('');
+  const [showUrlPopover, setShowUrlPopover] = useState(false);
   const [isResolving, setIsResolving] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState<{ text: string; type: 'info' | 'error' } | null>(null);
 
@@ -301,11 +316,13 @@ export default function App() {
     };
   });
 
-  // Channel tab UI states
+  // Channel tab UI states & custom episode order/selection
   const [channelQuery, setChannelQuery] = useState('');
   const [isSubscribingChannel, setIsSubscribingChannel] = useState(false);
   const [isRefreshingFeed, setIsRefreshingFeed] = useState(false);
   const [selectedChannelFilter, setSelectedChannelFilter] = useState<string>('all');
+  const [channelEpisodeOrder, setChannelEpisodeOrder] = useState<string[]>([]);
+  const [selectedVideoKey, setSelectedVideoKey] = useState<string | null>(null);
 
   // Queue & current track state
   const [queue, setQueue] = useState<Track[]>(() => {
@@ -442,6 +459,91 @@ export default function App() {
   const [sleepOnTrackEnd, setSleepOnTrackEnd] = useState(false);
   const [showSleepMenu, setShowSleepMenu] = useState(false);
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
+  const [showNightDimMenu, setShowNightDimMenu] = useState(false);
+
+  // Automatic System-Time Nocturnal Dimmer & Forced OLED Dark Theme State
+  const [nightDim, setNightDim] = useState<NightDimSettings>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEYS.NIGHT_DIM);
+      if (saved) {
+        const parsed = JSON.parse(saved) as Partial<NightDimSettings>;
+        return {
+          mode:
+            parsed.mode === 'auto' || parsed.mode === 'forced' || parsed.mode === 'off'
+              ? parsed.mode
+              : 'auto',
+          startHour:
+            typeof parsed.startHour === 'number' && parsed.startHour >= 0 && parsed.startHour <= 23
+              ? parsed.startHour
+              : 20,
+          endHour:
+            typeof parsed.endHour === 'number' && parsed.endHour >= 0 && parsed.endHour <= 23
+              ? parsed.endHour
+              : 7,
+          dimLevelPct:
+            typeof parsed.dimLevelPct === 'number'
+              ? Math.min(75, Math.max(15, parsed.dimLevelPct))
+              : 40,
+          pureOledBlack: typeof parsed.pureOledBlack === 'boolean' ? parsed.pureOledBlack : true,
+        };
+      }
+    } catch {
+      // fallback
+    }
+    return {
+      mode: 'auto',
+      startHour: 20,
+      endHour: 7,
+      dimLevelPct: 40,
+      pureOledBlack: true,
+    };
+  });
+
+  const [systemClock, setSystemClock] = useState<{ hour: number; formatted: string }>(() => {
+    const now = new Date();
+    return {
+      hour: now.getHours(),
+      formatted: now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }),
+    };
+  });
+
+  // Persist nightDim settings
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEYS.NIGHT_DIM, JSON.stringify(nightDim));
+    } catch {
+      // ignore
+    }
+  }, [nightDim]);
+
+  // Automatic timer polling system clock every 15 seconds & on visibility change
+  useEffect(() => {
+    const syncClock = () => {
+      const now = new Date();
+      setSystemClock({
+        hour: now.getHours(),
+        formatted: now.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }),
+      });
+    };
+    syncClock();
+    const interval = setInterval(syncClock, 15000);
+    window.addEventListener('focus', syncClock);
+    document.addEventListener('visibilitychange', syncClock);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', syncClock);
+      document.removeEventListener('visibilitychange', syncClock);
+    };
+  }, []);
+
+  const isScheduledNightNow = useMemo(
+    () => isHourWithinSchedule(systemClock.hour, nightDim.startHour, nightDim.endHour),
+    [systemClock.hour, nightDim.startHour, nightDim.endHour]
+  );
+
+  const isNightDimActive =
+    nightDim.mode === 'forced' || (nightDim.mode === 'auto' && isScheduledNightNow);
+  const isPureOledActive = isNightDimActive && nightDim.pureOledBlack;
 
   // Playlists & History UI state
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
@@ -556,7 +658,7 @@ export default function App() {
     return { counts, total };
   }, [subscriptions, isEpisodeNew]);
 
-  // Unified chronological episodes list (filtered by selectedChannelFilter)
+  // Unified chronological episodes list (filtered by selectedChannelFilter, respecting manual reorganization)
   const displayedChannelEpisodes = useMemo(() => {
     const all: ChannelEpisode[] = [];
     for (const ch of subscriptions) {
@@ -565,14 +667,21 @@ export default function App() {
         all.push(ep);
       }
     }
-    // Sort so new episodes and most recently published appear first
+    const orderMap = new Map<string, number>();
+    channelEpisodeOrder.forEach((vid, i) => orderMap.set(vid, i));
+
     return all.sort((a, b) => {
+      const aOrder = orderMap.get(a.videoId);
+      const bOrder = orderMap.get(b.videoId);
+      if (aOrder !== undefined && bOrder !== undefined) return aOrder - bOrder;
+      if (aOrder !== undefined) return -1;
+      if (bOrder !== undefined) return 1;
       const aNew = isEpisodeNew(a) ? 1 : 0;
       const bNew = isEpisodeNew(b) ? 1 : 0;
       if (aNew !== bNew) return bNew - aNew;
       return b.publishedAt - a.publishedAt;
     });
-  }, [subscriptions, selectedChannelFilter, isEpisodeNew]);
+  }, [subscriptions, selectedChannelFilter, isEpisodeNew, channelEpisodeOrder]);
 
   // Record a track in listening history & mark as seen in channel feed
   const recordHistory = useCallback(
@@ -594,21 +703,11 @@ export default function App() {
     [markEpisodeSeen]
   );
 
-  // Track navigation callbacks — calls audio.play() synchronously inside user gesture
-  const playTrackAtIndex = useCallback(
-    (index: number, autoPlay = true, resumePosition?: number) => {
-      if (index < 0 || index >= queue.length) return;
-      const targetTrack = queue[index];
-      setCurrentIndex(index);
-      if (targetTrack) {
-        markEpisodeSeen(targetTrack.videoId);
-      }
-      const audio = audioRef.current;
-      if (!audio || !targetTrack) return;
-
-      const streamUrl =
-        targetTrack.audioStreamUrl ||
-        `/api/youtube/stream?id=${targetTrack.videoId}&duration=${targetTrack.durationSeconds || 240}`;
+  // Start playback for an explicit Track object directly (eliminates stale queue closure bugs)
+  const startPlaybackForTrack = useCallback(
+    (targetTrack: Track, autoPlay = true, resumePosition?: number) => {
+      if (!targetTrack) return;
+      markEpisodeSeen(targetTrack.videoId);
 
       const startPos =
         typeof resumePosition === 'number'
@@ -618,56 +717,64 @@ export default function App() {
       pendingStartPosRef.current = startPos;
       setCurrentTime(startPos);
       setDuration(targetTrack.durationSeconds || 240);
+      setSeekTrigger({ time: startPos, seq: Date.now() });
 
-      audio.src = streamUrl;
-      audio.playbackRate = playbackRate;
-      (audio as HTMLAudioElement & { preservesPitch?: boolean }).preservesPitch = true;
+      const audio = audioRef.current;
+      if (audio) {
+        const streamUrl =
+          targetTrack.audioStreamUrl ||
+          `/api/youtube/stream?id=${targetTrack.videoId}&duration=${targetTrack.durationSeconds || 240}`;
+        audio.src = streamUrl;
+        audio.playbackRate = playbackRate;
+        (audio as HTMLAudioElement & { preservesPitch?: boolean }).preservesPitch = true;
 
-      if (startPos > 0) {
-        setSeekTrigger({ time: startPos, seq: Date.now() });
+        if (autoPlay) {
+          audio.play().catch(() => {
+            // Even if carrier audio is delayed, keep playing state for bridge
+          });
+        } else {
+          audio.pause();
+        }
       }
 
       if (autoPlay) {
         setIsPlaying(true);
         setIsBuffering(false);
         recordHistory(targetTrack, startPos);
-        audio.play().catch(() => {
-          // Even if carrier audio is delayed, keep playing state for bridge and retry on canplay
-        });
+      } else {
+        setIsPlaying(false);
       }
     },
-    [queue, playbackRate, savedPositions, recordHistory, markEpisodeSeen]
+    [playbackRate, savedPositions, recordHistory, markEpisodeSeen]
+  );
+
+  // Track navigation callbacks — calls startPlaybackForTrack synchronously inside user gesture
+  const playTrackAtIndex = useCallback(
+    (index: number, autoPlay = true, resumePosition?: number) => {
+      if (index < 0 || index >= queue.length) return;
+      const targetTrack = queue[index];
+      setCurrentIndex(index);
+      if (targetTrack) {
+        startPlaybackForTrack(targetTrack, autoPlay, resumePosition);
+      }
+    },
+    [queue, startPlaybackForTrack]
   );
 
   // Play a specific Track object immediately (from Channels or History)
   const playSpecificTrack = useCallback(
     (track: Track, resumeSec = 0) => {
-      markEpisodeSeen(track.videoId);
       const existingIdx = queue.findIndex((t) => t.videoId === track.videoId);
       if (existingIdx !== -1) {
-        playTrackAtIndex(existingIdx, true, resumeSec);
+        setCurrentIndex(existingIdx);
       } else {
-        setQueue((prev) => [track, ...prev]);
+        setQueue((prev) => [track, ...prev.filter((t) => t.videoId !== track.videoId)]);
         setCurrentIndex(0);
-        const audio = audioRef.current;
-        if (audio) {
-          const streamUrl =
-            track.audioStreamUrl ||
-            `/api/youtube/stream?id=${track.videoId}&duration=${track.durationSeconds || 240}`;
-          pendingStartPosRef.current = resumeSec;
-          setCurrentTime(resumeSec);
-          setDuration(track.durationSeconds || 240);
-          audio.src = streamUrl;
-          audio.playbackRate = playbackRate;
-          setIsPlaying(true);
-          setIsBuffering(false);
-          recordHistory(track, resumeSec);
-          audio.play().catch(() => {});
-        }
       }
+      startPlaybackForTrack(track, true, resumeSec);
       notify(`Reproduciendo: ${track.title}`);
     },
-    [queue, playTrackAtIndex, markEpisodeSeen, playbackRate, recordHistory, notify]
+    [queue, startPlaybackForTrack, notify]
   );
 
   const handleNextTrack = useCallback(() => {
@@ -835,7 +942,7 @@ export default function App() {
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !currentTrack) return;
-    if (!audio.src) {
+    if (!audio.src || !audio.src.includes(currentTrack.videoId)) {
       audio.src =
         currentTrack.audioStreamUrl ||
         `/api/youtube/stream?id=${currentTrack.videoId}&duration=${currentTrack.durationSeconds || 240}`;
@@ -843,8 +950,8 @@ export default function App() {
     }
   }, [currentTrack]);
 
-  // Handle pasting and resolving a YouTube URL
-  const handleAddUrl = async (mode: 'play' | 'queue', explicitUrl?: string) => {
+  // Handle pasting and resolving a YouTube URL from the top-right (+) floating box
+  const handleAddUrl = async (mode: 'play' | 'queue' = 'play', explicitUrl?: string) => {
     const raw = (explicitUrl ?? urlInput).trim();
     if (!raw) {
       notify('Pega un enlace de YouTube válido primero', 'error');
@@ -861,52 +968,30 @@ export default function App() {
     try {
       const resolvedTrack = await resolveYouTubeTrack(raw);
       setUrlInput('');
-
-      setQueue((prev) => {
-        const existingIdx = prev.findIndex((t) => t.videoId === resolvedTrack.videoId);
-        if (existingIdx !== -1) {
-          if (mode === 'play') {
-            setTimeout(() => playTrackAtIndex(existingIdx, true, 0), 30);
-          } else {
-            notify('La pista ya está en la cola de reproducción');
-          }
-          return prev;
-        }
-        const updated = mode === 'play' ? [resolvedTrack, ...prev] : [...prev, resolvedTrack];
-        if (mode === 'play') {
-          setTimeout(() => playTrackAtIndex(0, true, 0), 30);
-        } else {
-          notify(`Añadido a la cola: ${resolvedTrack.title}`);
-        }
-        return updated;
-      });
+      setShowUrlPopover(false);
 
       if (mode === 'play') {
+        setQueue((prev) => [
+          resolvedTrack,
+          ...prev.filter((t) => t.videoId !== resolvedTrack.videoId),
+        ]);
+        setCurrentIndex(0);
         setActiveTab('player');
+        startPlaybackForTrack(resolvedTrack, true, 0);
         notify(`Reproduciendo audio: ${resolvedTrack.title}`);
+      } else {
+        const alreadyInQueue = queue.some((t) => t.videoId === resolvedTrack.videoId);
+        if (alreadyInQueue) {
+          notify('La pista ya está en la cola de reproducción');
+        } else {
+          setQueue((prev) => [...prev, resolvedTrack]);
+          notify(`Añadido a la cola: ${resolvedTrack.title}`);
+        }
       }
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Error al extraer el audio', 'error');
     } finally {
       setIsResolving(false);
-    }
-  };
-
-  const handlePasteFromClipboard = async () => {
-    try {
-      const text = await navigator.clipboard.readText();
-      if (text && text.trim()) {
-        setUrlInput(text.trim());
-        if (extractYouTubeIdClient(text.trim())) {
-          await handleAddUrl('play', text.trim());
-        } else {
-          notify('Texto pegado. Verifica que sea un enlace de YouTube.', 'error');
-        }
-      } else {
-        notify('El portapapeles está vacío', 'error');
-      }
-    } catch {
-      notify('Pega el enlace directamente en el campo de texto', 'info');
     }
   };
 
@@ -1025,24 +1110,126 @@ export default function App() {
     }
   };
 
-  // Queue Management Handlers
-  const moveQueueTrack = (index: number, direction: 'up' | 'down') => {
-    const targetIdx = direction === 'up' ? index - 1 : index + 1;
-    if (targetIdx < 0 || targetIdx >= queue.length) return;
+  // Queue Drag-and-Drop & Touch Reordering State
+  const queueListRef = useRef<HTMLDivElement | null>(null);
+  const [draggingQueueIdx, setDraggingQueueIdx] = useState<number | null>(null);
+  const [dragOverQueueIdx, setDragOverQueueIdx] = useState<number | null>(null);
+  const activeDragIdxRef = useRef<number | null>(null);
+
+  const reorderQueueTrack = useCallback((fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0) return;
 
     setQueue((prev) => {
+      if (fromIndex >= prev.length || toIndex >= prev.length) return prev;
       const copy = [...prev];
-      const [moved] = copy.splice(index, 1);
-      copy.splice(targetIdx, 0, moved);
+      const [moved] = copy.splice(fromIndex, 1);
+      copy.splice(toIndex, 0, moved);
       return copy;
     });
 
-    if (currentIndex === index) {
-      setCurrentIndex(targetIdx);
-    } else if (currentIndex === targetIdx) {
-      setCurrentIndex(index);
-    }
-  };
+    setCurrentIndex((prevIdx) => {
+      if (prevIdx === fromIndex) return toIndex;
+      if (fromIndex < prevIdx && toIndex >= prevIdx) return prevIdx - 1;
+      if (fromIndex > prevIdx && toIndex <= prevIdx) return prevIdx + 1;
+      return prevIdx;
+    });
+  }, []);
+
+  // Native Touch & Pointer Drag Handler for Queue Rows
+  const handleStartQueueDrag = useCallback(
+    (startIndex: number) => {
+      activeDragIdxRef.current = startIndex;
+      setDraggingQueueIdx(startIndex);
+      setDragOverQueueIdx(startIndex);
+
+      const resolveTargetIndexFromY = (clientY: number) => {
+        const container = queueListRef.current;
+        if (!container) return;
+
+        // Auto-scroll container when dragging near top or bottom edges
+        const containerRect = container.getBoundingClientRect();
+        const edgeThreshold = 36;
+        if (clientY < containerRect.top + edgeThreshold) {
+          container.scrollTop -= 8;
+        } else if (clientY > containerRect.bottom - edgeThreshold) {
+          container.scrollTop += 8;
+        }
+
+        const rows = container.querySelectorAll<HTMLElement>('[data-queue-idx]');
+        let targetIdx: number | null = null;
+
+        rows.forEach((row) => {
+          const rect = row.getBoundingClientRect();
+          const midY = rect.top + rect.height / 2;
+          const idxAttr = row.getAttribute('data-queue-idx');
+          if (idxAttr === null) return;
+          const parsedIdx = parseInt(idxAttr, 10);
+          if (!Number.isFinite(parsedIdx)) return;
+
+          if (clientY >= rect.top && clientY <= rect.bottom) {
+            targetIdx = parsedIdx;
+          } else if (
+            activeDragIdxRef.current !== null &&
+            parsedIdx < activeDragIdxRef.current &&
+            clientY < midY &&
+            targetIdx === null
+          ) {
+            targetIdx = parsedIdx;
+          } else if (
+            activeDragIdxRef.current !== null &&
+            parsedIdx > activeDragIdxRef.current &&
+            clientY > midY
+          ) {
+            targetIdx = parsedIdx;
+          }
+        });
+
+        if (
+          targetIdx !== null &&
+          activeDragIdxRef.current !== null &&
+          targetIdx !== activeDragIdxRef.current
+        ) {
+          const fromIdx = activeDragIdxRef.current;
+          activeDragIdxRef.current = targetIdx;
+          setDraggingQueueIdx(targetIdx);
+          setDragOverQueueIdx(targetIdx);
+          reorderQueueTrack(fromIdx, targetIdx);
+        }
+      };
+
+      const handleTouchMove = (e: TouchEvent) => {
+        if (activeDragIdxRef.current === null) return;
+        if (e.cancelable) e.preventDefault();
+        const touch = e.touches[0];
+        if (touch) {
+          resolveTargetIndexFromY(touch.clientY);
+        }
+      };
+
+      const handleMouseMove = (e: MouseEvent) => {
+        if (activeDragIdxRef.current === null) return;
+        resolveTargetIndexFromY(e.clientY);
+      };
+
+      const handleEnd = () => {
+        activeDragIdxRef.current = null;
+        setDraggingQueueIdx(null);
+        setDragOverQueueIdx(null);
+        window.removeEventListener('touchmove', handleTouchMove);
+        window.removeEventListener('touchend', handleEnd);
+        window.removeEventListener('touchcancel', handleEnd);
+        window.removeEventListener('mousemove', handleMouseMove);
+        window.removeEventListener('mouseup', handleEnd);
+      };
+
+      window.addEventListener('touchmove', handleTouchMove, { passive: false });
+      window.addEventListener('touchend', handleEnd);
+      window.addEventListener('touchcancel', handleEnd);
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleEnd);
+    },
+    [reorderQueueTrack]
+  );
 
   const removeQueueTrack = (index: number) => {
     if (queue.length <= 1) {
@@ -1158,6 +1345,86 @@ export default function App() {
           : pl
       )
     );
+    notify('Vídeo eliminado de la lista');
+  };
+
+  const handleReorderPlaylistTrack = (playlistId: string, fromIndex: number, toIndex: number) => {
+    setPlaylists((prev) =>
+      prev.map((pl) => {
+        if (pl.id !== playlistId) return pl;
+        if (
+          fromIndex < 0 ||
+          toIndex < 0 ||
+          fromIndex >= pl.tracks.length ||
+          toIndex >= pl.tracks.length ||
+          fromIndex === toIndex
+        ) {
+          return pl;
+        }
+        const nextTracks = [...pl.tracks];
+        const [moved] = nextTracks.splice(fromIndex, 1);
+        nextTracks.splice(toIndex, 0, moved);
+        return { ...pl, tracks: nextTracks };
+      })
+    );
+  };
+
+  const handleReorderChannelEpisode = (fromIndex: number, toIndex: number) => {
+    if (
+      fromIndex < 0 ||
+      toIndex < 0 ||
+      fromIndex >= displayedChannelEpisodes.length ||
+      toIndex >= displayedChannelEpisodes.length ||
+      fromIndex === toIndex
+    ) {
+      return;
+    }
+    const currentOrder = displayedChannelEpisodes.map((ep) => ep.videoId);
+    const [moved] = currentOrder.splice(fromIndex, 1);
+    currentOrder.splice(toIndex, 0, moved);
+    setChannelEpisodeOrder(currentOrder);
+  };
+
+  const handleDeleteChannelEpisode = (channelId: string, videoId: string) => {
+    setSubscriptions((prev) =>
+      prev.map((ch) =>
+        ch.channelId === channelId
+          ? { ...ch, episodes: ch.episodes.filter((ep) => ep.videoId !== videoId) }
+          : ch
+      )
+    );
+    setChannelEpisodeOrder((prev) => prev.filter((id) => id !== videoId));
+    notify('Vídeo eliminado del canal');
+  };
+
+  const handleReorderHistoryItem = (fromIndex: number, toIndex: number) => {
+    if (
+      fromIndex < 0 ||
+      toIndex < 0 ||
+      fromIndex >= filteredHistory.length ||
+      toIndex >= filteredHistory.length ||
+      fromIndex === toIndex
+    ) {
+      return;
+    }
+    const sourceItem = filteredHistory[fromIndex];
+    const targetItem = filteredHistory[toIndex];
+    if (!sourceItem || !targetItem) return;
+
+    setHistory((prev) => {
+      const realFrom = prev.findIndex((item) => item.id === sourceItem.id);
+      const realTo = prev.findIndex((item) => item.id === targetItem.id);
+      if (realFrom === -1 || realTo === -1 || realFrom === realTo) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(realFrom, 1);
+      next.splice(realTo, 0, moved);
+      return next;
+    });
+  };
+
+  const handleDeleteHistoryItem = (itemId: string) => {
+    setHistory((prev) => prev.filter((item) => item.id !== itemId));
+    notify('Vídeo eliminado del historial');
   };
 
   // Restore or merge library (playlists, queue, positions, subscriptions, history) from Google Drive
@@ -1279,7 +1546,22 @@ export default function App() {
     playlists.find((p) => p.id === selectedPlaylistId) || playlists[0] || null;
 
   return (
-    <div className="h-[100dvh] w-full bg-[#090A0F] text-[#F1F5F9] flex flex-col overflow-hidden select-none">
+    <div
+      className={`h-[100dvh] w-full ${
+        isPureOledActive ? 'bg-black' : 'bg-[#090A0F]'
+      } text-[#F1F5F9] flex flex-col overflow-hidden select-none transition-colors duration-700`}
+    >
+      {/* Automatic System-Time Brightness Attenuation Veil (Pointer-Events-None Overlay) */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none fixed inset-0 z-[8500] transition-opacity duration-700"
+        style={{
+          opacity: isNightDimActive ? nightDim.dimLevelPct / 100 : 0,
+          background:
+            'radial-gradient(circle at 50% 40%, rgba(4, 3, 2, 0.88), rgba(0, 0, 0, 0.96))',
+        }}
+      />
+
       {/* Synchronized Client-Side YouTube Audio Bridge for 100% Real YouTube Audio */}
       {currentTrack && (
         <YouTubeAudioBridge
@@ -1398,18 +1680,18 @@ export default function App() {
         }}
       />
 
-      {/* Top Navigation & Instant YouTube Link Bar — Unified Single Bar in Mobile Landscape */}
+      {/* Top Header Bar with Integrated Circular (+) Button in Top-Right Corner */}
       <header
         className={`${
           isMobileLandscape ? 'h-11 px-2.5 gap-2' : 'h-14 px-3 sm:px-6 gap-3 sm:gap-6'
-        } border-b border-white/[0.07] bg-[#090A0F]/95 backdrop-blur-md flex items-center justify-between shrink-0 z-30`}
+        } border-b border-white/[0.07] bg-[#090A0F]/95 backdrop-blur-md flex items-center justify-between shrink-0 z-30 relative`}
       >
         {/* Zone 1: Brand Wordmark */}
         <a
           href="#player"
           onClick={(e) => {
             e.preventDefault();
-            setActiveTab(isMobileLandscape ? 'playlists' : 'player');
+            setActiveTab('player');
           }}
           className={`${
             isMobileLandscape ? 'text-sm' : 'text-base sm:text-lg'
@@ -1424,111 +1706,8 @@ export default function App() {
           <span>AuraTube</span>
         </a>
 
-        {/* In Mobile Landscape: Unified Inline YouTube URL Bar inside Header to save vertical height */}
-        {isMobileLandscape ? (
-          <div className="flex-1 max-w-xl flex items-center gap-1.5 min-w-0">
-            <div className="relative flex-1 flex items-center min-w-0">
-              <input
-                type="url"
-                value={urlInput}
-                onChange={(e) => setUrlInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    handleAddUrl('play');
-                  }
-                }}
-                placeholder="Pegar enlace YouTube..."
-                className="w-full h-8 pl-2.5 pr-7 rounded-lg bg-[#12151E] border border-white/10 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500"
-                disabled={isResolving}
-              />
-              <button
-                type="button"
-                onClick={handlePasteFromClipboard}
-                className="absolute right-0.5 h-7 w-7 flex items-center justify-center text-slate-400 hover:text-amber-400 rounded-md cursor-pointer"
-                title="Pegar del portapapeles"
-                aria-label="Pegar del portapapeles"
-              >
-                <ClipboardPaste className="w-3.5 h-3.5" />
-              </button>
-            </div>
-            <button
-              type="button"
-              onClick={() => handleAddUrl('play')}
-              disabled={isResolving}
-              className="h-8 px-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs flex items-center gap-1 shrink-0 cursor-pointer"
-              title="Reproducir enlace"
-            >
-              {isResolving ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Play className="w-3.5 h-3.5 fill-current" />
-              )}
-              <span>Play</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleAddUrl('queue')}
-              disabled={isResolving}
-              className="h-8 w-8 rounded-lg bg-[#12151E] border border-white/10 hover:border-amber-500/40 text-amber-400 flex items-center justify-center shrink-0 cursor-pointer"
-              title="Añadir a la cola"
-              aria-label="Añadir a la cola"
-            >
-              <Plus className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        ) : (
-          /* Desktop Single-Line Navigation Links (5 links) */
-          <nav className="hidden lg:flex items-center gap-6 text-sm font-medium text-slate-400">
-            <button
-              onClick={() => setActiveTab('player')}
-              className={`hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer py-1 ${
-                activeTab === 'player' ? 'text-white border-b-2 border-amber-500' : ''
-              }`}
-            >
-              Reproductor
-            </button>
-            <button
-              onClick={() => setActiveTab('queue')}
-              className={`hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer py-1 ${
-                activeTab === 'queue' ? 'text-white border-b-2 border-amber-500' : ''
-              }`}
-            >
-              Cola ({queue.length})
-            </button>
-            <button
-              onClick={() => setActiveTab('channels')}
-              className={`hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer py-1 ${
-                activeTab === 'channels'
-                  ? 'text-white border-b-2 border-amber-500'
-                  : newCountByChannel.total > 0
-                  ? 'text-amber-400'
-                  : ''
-              }`}
-            >
-              Canales {newCountByChannel.total > 0 ? `(${newCountByChannel.total} nuevos)` : ''}
-            </button>
-            <button
-              onClick={() => setActiveTab('playlists')}
-              className={`hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer py-1 ${
-                activeTab === 'playlists' ? 'text-white border-b-2 border-amber-500' : ''
-              }`}
-            >
-              Listas ({playlists.length})
-            </button>
-            <button
-              onClick={() => setActiveTab('history')}
-              className={`hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer py-1 ${
-                activeTab === 'history' ? 'text-white border-b-2 border-amber-500' : ''
-              }`}
-            >
-              Historial
-            </button>
-          </nav>
-        )}
-
-        {/* Zone 3: Quick Split-Ratio Presets (in Split Layout) + PWA Action */}
-        <div className="flex items-center gap-1.5 shrink-0">
+        {/* Zone 2: Top-Right Utilities + Circular (+) Button to Paste YouTube Link */}
+        <div className="flex items-center gap-2 shrink-0">
           {isSplitLayout && (
             <div
               className="flex items-center bg-[#12151E] border border-white/10 rounded-lg p-0.5 text-[10px] font-mono-tabular"
@@ -1555,72 +1734,92 @@ export default function App() {
             </div>
           )}
           <PWAInstallButton />
+
+          {/* Circular (+) Button in Top-Right Corner */}
+          <button
+            type="button"
+            onClick={() => setShowUrlPopover((prev) => !prev)}
+            className={`${
+              isMobileLandscape ? 'w-8 h-8' : 'w-9 h-9 sm:w-10 sm:h-10'
+            } rounded-full bg-amber-500 hover:bg-amber-400 active:scale-95 text-slate-950 font-bold shadow-md shadow-amber-500/20 flex items-center justify-center transition-all shrink-0 cursor-pointer`}
+            title="Pega enlace YouTube"
+            aria-label="Pega enlace YouTube"
+            aria-expanded={showUrlPopover}
+          >
+            <Plus
+              className={`w-5 h-5 stroke-[2.5] transition-transform duration-200 ${
+                showUrlPopover ? 'rotate-45' : ''
+              }`}
+            />
+          </button>
         </div>
       </header>
 
-      {/* Compact YouTube URL Paste Bar (Hidden in Mobile Landscape because it is unified in the top header) */}
-      {!isMobileLandscape && (
-        <section className="px-3 sm:px-6 py-2.5 bg-[#12151E]/80 border-b border-white/[0.06] shrink-0 z-20">
-          <div className="max-w-7xl mx-auto flex items-center gap-2">
-            <div className="relative flex-1 flex items-center">
-              <input
-                type="url"
-                value={urlInput}
-                onChange={(e) => setUrlInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    handleAddUrl('play');
-                  }
-                }}
-                placeholder="Pega enlace de YouTube (watch, youtu.be, shorts, live)..."
-                className="w-full min-h-[44px] pl-3.5 pr-10 rounded-xl bg-[#090A0F] border border-white/10 text-xs sm:text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500 transition-colors"
-                disabled={isResolving}
-              />
-              <button
-                type="button"
-                onClick={handlePasteFromClipboard}
-                className="absolute right-1 min-h-[38px] min-w-[38px] flex items-center justify-center text-slate-400 hover:text-amber-400 rounded-lg transition-colors cursor-pointer"
-                title="Pegar enlace del portapapeles y reproducir"
-                aria-label="Pegar del portapapeles"
+      {/* Floating YouTube URL Box Above Interface (Top-Right) */}
+      {showUrlPopover && (
+        <>
+          <div
+            className="fixed inset-0 z-40 bg-black/25"
+            onClick={() => {
+              if (!isResolving) setShowUrlPopover(false);
+            }}
+            aria-hidden="true"
+          />
+          <div
+            role="dialog"
+            aria-label="Pega enlace YouTube"
+            className={`fixed ${
+              isMobileLandscape ? 'top-12 right-2.5' : 'top-15 right-3 sm:right-6'
+            } z-50 w-[min(92vw,360px)] rounded-2xl bg-[#12151E] border border-white/15 shadow-2xl p-3.5 backdrop-blur-xl`}
+          >
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleAddUrl('play');
+              }}
+              className="flex flex-col gap-2.5"
+            >
+              <label
+                htmlFor="youtube-url-popover-input"
+                className="text-xs font-semibold text-slate-200 tracking-wide"
               >
-                <ClipboardPaste className="w-4 h-4" />
-              </button>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => handleAddUrl('play')}
-              disabled={isResolving}
-              className="min-h-[44px] px-3.5 sm:px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs sm:text-sm flex items-center gap-1.5 transition-all active:scale-[0.98] disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              {isResolving ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <Play className="w-4 h-4 fill-current" />
-              )}
-              <span>Escuchar</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleAddUrl('queue')}
-              disabled={isResolving}
-              className="min-h-[44px] px-3 rounded-xl bg-[#090A0F] border border-white/10 hover:border-amber-500/40 text-slate-200 font-medium text-xs sm:text-sm flex items-center gap-1 transition-colors disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
-              title="Añadir enlace al final de la cola"
-            >
-              <Plus className="w-4 h-4 text-amber-400" />
-              <span className="hidden sm:inline">A la cola</span>
-            </button>
+                Pega enlace YouTube
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  id="youtube-url-popover-input"
+                  type="url"
+                  autoFocus
+                  value={urlInput}
+                  onChange={(e) => setUrlInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape' && !isResolving) {
+                      setShowUrlPopover(false);
+                    }
+                  }}
+                  placeholder="Pega enlace YouTube"
+                  className="flex-1 min-w-0 min-h-[40px] px-3 rounded-xl bg-[#090A0F] border border-white/10 text-xs sm:text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500 transition-colors"
+                  disabled={isResolving}
+                />
+                <button
+                  type="submit"
+                  disabled={isResolving}
+                  className="min-h-[40px] px-4 rounded-xl bg-amber-500 hover:bg-amber-400 active:scale-[0.98] disabled:opacity-50 text-slate-950 font-semibold text-xs sm:text-sm flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 transition-all cursor-pointer"
+                >
+                  {isResolving && <Loader2 className="w-4 h-4 animate-spin" />}
+                  <span>Cargar</span>
+                </button>
+              </div>
+            </form>
           </div>
-        </section>
+        </>
       )}
 
       {/* Non-intrusive Feedback Banner */}
       {feedbackMsg && (
         <div
           className={`fixed ${
-            isMobileLandscape ? 'top-12' : 'top-28'
+            isMobileLandscape ? 'top-12' : 'top-16'
           } left-1/2 -translate-x-1/2 z-50 max-w-md w-[92%] pointer-events-none`}
         >
           <div
@@ -1649,16 +1848,34 @@ export default function App() {
       >
         {/* LEFT COLUMN: PLAYER CONTROLS (Always fixed on Left in Mobile Landscape & Desktop) */}
         <section
-          style={isSplitLayout ? { width: `${leftSplitPct}%` } : undefined}
-          className={`relative h-full min-h-0 shrink-0 flex flex-col justify-between bg-[#12151E] border border-white/[0.08] rounded-2xl ${
+          style={{
+            ...(isSplitLayout ? { width: `${leftSplitPct}%` } : {}),
+            ...(isNightDimActive
+              ? {
+                  filter: `brightness(${Math.max(
+                    0.5,
+                    1 - nightDim.dimLevelPct / 170
+                  ).toFixed(2)})`,
+                }
+              : {}),
+          }}
+          className={`relative h-full min-h-0 shrink-0 flex flex-col justify-between ${
+            isPureOledActive
+              ? 'bg-black border-amber-500/15'
+              : 'bg-[#12151E] border-white/[0.08]'
+          } border rounded-2xl ${
             isMobileLandscape ? 'p-2.5' : 'p-3.5 sm:p-5'
-          } overflow-hidden ${isSplitLayout || activeTab === 'player' ? 'flex' : 'hidden'}`}
+          } overflow-hidden transition-all duration-700 ${
+            isSplitLayout || activeTab === 'player' ? 'flex' : 'hidden'
+          }`}
         >
-          {/* Ambient Blurred Video Thumbnail Aura Behind Player */}
+          {/* Ambient Blurred Video Thumbnail Aura Behind Player (Reduced in Forced OLED Mode) */}
           {currentTrack?.thumbnailUrl && (
             <div
               aria-hidden="true"
-              className="pointer-events-none absolute -inset-8 z-0 opacity-20 blur-3xl transition-opacity duration-700"
+              className={`pointer-events-none absolute -inset-8 z-0 ${
+                isPureOledActive ? 'opacity-5' : 'opacity-20'
+              } blur-3xl transition-opacity duration-700`}
               style={{
                 backgroundImage: `url(${currentTrack.thumbnailUrl})`,
                 backgroundSize: 'cover',
@@ -1675,6 +1892,17 @@ export default function App() {
               <span className="truncate">
                 {isMobileLandscape ? '2º Plano' : 'Media Session Activa'}
               </span>
+              {isNightDimActive && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span
+                    className="text-amber-300/90 font-mono-tabular truncate"
+                    title={`Tema oscuro forzado / Atenuación activa (${systemClock.formatted})`}
+                  >
+                    {isPureOledActive ? 'OLED' : 'Atenuado'} -{nightDim.dimLevelPct}%
+                  </span>
+                </>
+              )}
               {sleepRemainingSec !== null && (
                 <>
                   <span aria-hidden="true">·</span>
@@ -1973,11 +2201,11 @@ export default function App() {
             </button>
           </div>
 
-          {/* Secondary Studio Utility Bar: Speed (0.5x-2x), Sleep Timer, Repeat & Volume */}
+          {/* Secondary Studio Utility Bar: Speed (0.5x-2x), Sleep Timer, System-Time Auto Dimmer, Repeat & Volume */}
           <div
             className={`${
               isMobileLandscape ? 'mt-1.5 pt-1.5' : 'mt-3 pt-2.5'
-            } border-t border-white/[0.07] flex items-center justify-between gap-1.5 shrink-0 relative`}
+            } border-t border-white/[0.07] flex items-center justify-between gap-1 shrink-0 relative z-20`}
           >
             {/* Playback Speed Control */}
             <div className="relative">
@@ -1985,9 +2213,10 @@ export default function App() {
                 onClick={() => {
                   setShowSpeedMenu((prev) => !prev);
                   setShowSleepMenu(false);
+                  setShowNightDimMenu(false);
                 }}
                 className={`${
-                  isMobileLandscape ? 'min-h-[32px] px-2 text-[11px]' : 'min-h-[44px] px-3 text-xs'
+                  isMobileLandscape ? 'min-h-[32px] px-2 text-[11px]' : 'min-h-[44px] px-2.5 text-xs'
                 } rounded-xl border font-mono-tabular font-medium flex items-center gap-1 transition-colors cursor-pointer ${
                   playbackRate !== 1
                     ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
@@ -2033,9 +2262,10 @@ export default function App() {
                 onClick={() => {
                   setShowSleepMenu((prev) => !prev);
                   setShowSpeedMenu(false);
+                  setShowNightDimMenu(false);
                 }}
                 className={`${
-                  isMobileLandscape ? 'min-h-[32px] px-2 text-[11px]' : 'min-h-[44px] px-3 text-xs'
+                  isMobileLandscape ? 'min-h-[32px] px-2 text-[11px]' : 'min-h-[44px] px-2.5 text-xs'
                 } rounded-xl border font-medium flex items-center gap-1 transition-colors cursor-pointer ${
                   sleepRemainingSec !== null || sleepOnTrackEnd
                     ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
@@ -2079,6 +2309,185 @@ export default function App() {
                       );
                     })}
                   </div>
+                </div>
+              )}
+            </div>
+
+            {/* Automatic System-Time Nocturnal Dimmer & Forced OLED Dark Theme */}
+            <div className="relative">
+              <button
+                onClick={() => {
+                  setShowNightDimMenu((prev) => !prev);
+                  setShowSpeedMenu(false);
+                  setShowSleepMenu(false);
+                }}
+                className={`${
+                  isMobileLandscape ? 'min-h-[32px] px-2 text-[11px]' : 'min-h-[44px] px-2.5 text-xs'
+                } rounded-xl border font-medium flex items-center gap-1 transition-colors cursor-pointer ${
+                  isNightDimActive
+                    ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                    : nightDim.mode === 'auto'
+                    ? 'bg-[#090A0F] border-amber-500/25 text-slate-200 hover:text-white'
+                    : 'bg-[#090A0F] border-white/10 text-slate-300 hover:text-white'
+                }`}
+                title="Temporizador automático de tema oscuro forzado y atenuación de brillo por hora del sistema"
+              >
+                <SunDim className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span className="font-mono-tabular">
+                  {isNightDimActive
+                    ? `-${nightDim.dimLevelPct}%`
+                    : nightDim.mode === 'auto'
+                    ? `${String(nightDim.startHour).padStart(2, '0')}h`
+                    : 'Brillo'}
+                </span>
+              </button>
+
+              {showNightDimMenu && (
+                <div className="absolute bottom-11 right-0 sm:left-1/2 sm:-translate-x-1/2 z-40 w-64 rounded-2xl bg-[#090A0F] border border-white/15 p-3 shadow-2xl space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 border-b border-white/10 pb-2">
+                    <div>
+                      <p className="text-xs font-semibold text-white">
+                        Brillo & OLED Nocturno
+                      </p>
+                      <p className="text-[10px] text-slate-400 flex items-center gap-1 mt-0.5 font-mono-tabular">
+                        <Clock className="w-3 h-3 text-amber-400" />
+                        <span>Sistema: {systemClock.formatted}</span>
+                        <span>·</span>
+                        <span className={isNightDimActive ? 'text-amber-300' : 'text-slate-400'}>
+                          {isNightDimActive ? 'Activo' : 'En espera'}
+                        </span>
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Mode Selector: Auto (System Time), Forced, Off */}
+                  <div className="grid grid-cols-3 gap-1 bg-[#12151E] p-1 rounded-xl border border-white/10">
+                    {(
+                      [
+                        { id: 'auto', label: 'Auto (Hora)' },
+                        { id: 'forced', label: 'Forzar' },
+                        { id: 'off', label: 'Apagado' },
+                      ] as const
+                    ).map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => {
+                          setNightDim((prev) => ({ ...prev, mode: m.id }));
+                          notify(
+                            m.id === 'auto'
+                              ? `Atenuación automática (${String(nightDim.startHour).padStart(2, '0')}:00 - ${String(nightDim.endHour).padStart(2, '0')}:00)`
+                              : m.id === 'forced'
+                              ? 'Tema oscuro OLED y atenuación forzados'
+                              : 'Atenuación nocturna desactivada'
+                          );
+                        }}
+                        className={`py-1.5 px-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer ${
+                          nightDim.mode === m.id
+                            ? 'bg-amber-500 text-slate-950 font-semibold'
+                            : 'text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Automatic System Hour Window Selector */}
+                  {nightDim.mode === 'auto' && (
+                    <div className="grid grid-cols-2 gap-2 pt-0.5">
+                      <div>
+                        <label className="block text-[10px] text-slate-400 mb-1">
+                          Activar desde
+                        </label>
+                        <select
+                          value={nightDim.startHour}
+                          onChange={(e) =>
+                            setNightDim((prev) => ({
+                              ...prev,
+                              startHour: parseInt(e.target.value, 10),
+                            }))
+                          }
+                          className="w-full h-8 px-2 rounded-lg bg-[#12151E] border border-white/10 text-xs text-slate-100 font-mono-tabular focus:outline-none focus:border-amber-500"
+                        >
+                          {[18, 19, 20, 21, 22, 23, 0].map((hr) => (
+                            <option key={hr} value={hr}>
+                              {String(hr).padStart(2, '0')}:00
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-slate-400 mb-1">
+                          Hasta las
+                        </label>
+                        <select
+                          value={nightDim.endHour}
+                          onChange={(e) =>
+                            setNightDim((prev) => ({
+                              ...prev,
+                              endHour: parseInt(e.target.value, 10),
+                            }))
+                          }
+                          className="w-full h-8 px-2 rounded-lg bg-[#12151E] border border-white/10 text-xs text-slate-100 font-mono-tabular focus:outline-none focus:border-amber-500"
+                        >
+                          {[5, 6, 7, 8, 9, 10].map((hr) => (
+                            <option key={hr} value={hr}>
+                              {String(hr).padStart(2, '0')}:00
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Brightness Attenuation Level Slider */}
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-slate-300">Atenuación de brillo</span>
+                      <span className="text-amber-400 font-mono-tabular font-semibold">
+                        -{nightDim.dimLevelPct}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={15}
+                      max={75}
+                      step={5}
+                      value={nightDim.dimLevelPct}
+                      onChange={(e) =>
+                        setNightDim((prev) => ({
+                          ...prev,
+                          dimLevelPct: parseInt(e.target.value, 10),
+                        }))
+                      }
+                      className="w-full h-5 audio-scrubber bg-white/10 rounded-full"
+                      aria-label="Nivel de atenuación de brillo"
+                    />
+                  </div>
+
+                  {/* Pure OLED Black Theme Toggle */}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setNightDim((prev) => ({
+                        ...prev,
+                        pureOledBlack: !prev.pureOledBlack,
+                      }))
+                    }
+                    className="w-full py-1.5 px-2.5 rounded-xl bg-[#12151E] border border-white/10 hover:border-amber-500/40 flex items-center justify-between text-xs text-slate-200 cursor-pointer transition-colors"
+                  >
+                    <span>Tema OLED Negro Puro</span>
+                    <span
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                        nightDim.pureOledBlack
+                          ? 'bg-amber-500/20 text-amber-300'
+                          : 'bg-white/5 text-slate-400'
+                      }`}
+                    >
+                      {nightDim.pureOledBlack ? 'ON' : 'OFF'}
+                    </span>
+                  </button>
                 </div>
               )}
             </div>
@@ -2167,68 +2576,61 @@ export default function App() {
             !isSplitLayout && activeTab === 'player' ? 'hidden' : 'flex'
           }`}
         >
-          {/* Sub-Header Switcher inside Right Panel with Simplified Tabs & Button Size Control (S / M / L) */}
+          {/* Sub-Header inside Right Panel: Active Section Label + Button Size Control (S / M / L) & Contextual Actions */}
           <div
             className={`${
-              isMobileLandscape ? 'px-2.5 py-1.5' : 'px-3 sm:px-5 py-2.5'
-            } border-b border-white/[0.07] flex items-center justify-between gap-2 shrink-0 overflow-x-auto custom-scroll`}
+              isMobileLandscape ? 'px-2.5 py-1.5' : 'px-3 sm:px-5 py-2'
+            } w-full min-w-0 border-b border-white/[0.07] flex items-center justify-between gap-2 shrink-0 overflow-hidden`}
           >
-            <div className="flex items-center gap-1 bg-[#090A0F] p-1 rounded-xl border border-white/5 shrink-0">
-              <button
-                onClick={() => setActiveTab('playlists')}
-                className={`${rTabBtnClass} font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1 ${
-                  rightActiveTab === 'playlists'
-                    ? 'bg-amber-500 text-slate-950 font-semibold shadow-sm'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                <FolderPlus className="w-3.5 h-3.5" />
-                <span>Listas ({playlists.length})</span>
-              </button>
-              <button
-                onClick={() => setActiveTab('queue')}
-                className={`${rTabBtnClass} font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1 ${
-                  rightActiveTab === 'queue'
-                    ? 'bg-amber-500 text-slate-950 font-semibold shadow-sm'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                <ListMusic className="w-3.5 h-3.5" />
-                <span>Cola ({queue.length})</span>
-              </button>
-              <button
-                onClick={() => setActiveTab('channels')}
-                className={`${rTabBtnClass} font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1 ${
-                  rightActiveTab === 'channels'
-                    ? 'bg-amber-500 text-slate-950 font-semibold shadow-sm'
-                    : newCountByChannel.total > 0
-                    ? 'text-amber-400 hover:text-amber-300'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                <Radio className="w-3.5 h-3.5" />
-                <span>
-                  Canales{' '}
-                  {newCountByChannel.total > 0
-                    ? `(${newCountByChannel.total})`
-                    : `(${subscriptions.length})`}
-                </span>
-              </button>
-              <button
-                onClick={() => setActiveTab('history')}
-                className={`${rTabBtnClass} font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1 ${
-                  rightActiveTab === 'history'
-                    ? 'bg-amber-500 text-slate-950 font-semibold shadow-sm'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                <History className="w-3.5 h-3.5" />
-                <span>Historial</span>
-              </button>
+            <div className="flex items-center gap-2 min-w-0">
+              {rightActiveTab === 'queue' && (
+                <>
+                  <ListMusic className="w-4 h-4 text-amber-400 shrink-0" />
+                  <h2 className="text-xs sm:text-sm font-semibold font-display text-white truncate">
+                    Cola de reproducción
+                  </h2>
+                  <span className="text-[11px] font-mono-tabular text-slate-400">
+                    ({queue.length})
+                  </span>
+                </>
+              )}
+              {rightActiveTab === 'channels' && (
+                <>
+                  <Radio className="w-4 h-4 text-amber-400 shrink-0" />
+                  <h2 className="text-xs sm:text-sm font-semibold font-display text-white truncate">
+                    Canales suscritos
+                  </h2>
+                  <span className="text-[11px] font-mono-tabular text-slate-400">
+                    ({displayedChannelEpisodes.length})
+                  </span>
+                </>
+              )}
+              {rightActiveTab === 'playlists' && (
+                <>
+                  <FolderPlus className="w-4 h-4 text-amber-400 shrink-0" />
+                  <h2 className="text-xs sm:text-sm font-semibold font-display text-white truncate">
+                    Listas de reproducción
+                  </h2>
+                  <span className="text-[11px] font-mono-tabular text-slate-400">
+                    ({playlists.length})
+                  </span>
+                </>
+              )}
+              {rightActiveTab === 'history' && (
+                <>
+                  <History className="w-4 h-4 text-amber-400 shrink-0" />
+                  <h2 className="text-xs sm:text-sm font-semibold font-display text-white truncate">
+                    Historial de escucha
+                  </h2>
+                  <span className="text-[11px] font-mono-tabular text-slate-400">
+                    ({history.length})
+                  </span>
+                </>
+              )}
             </div>
 
             {/* Right Controls: Dimensionable Button Size Selector (S/M/L) + Contextual Action */}
-            <div className="flex items-center gap-1.5 shrink-0">
+            <div className="flex items-center gap-1 shrink-0">
               <div
                 className="flex items-center bg-[#090A0F] border border-white/10 rounded-lg p-0.5 text-[10px] font-mono-tabular"
                 title="Redimensionar botones de opciones y listas (Compacto / Estándar / Grande)"
@@ -2259,19 +2661,21 @@ export default function App() {
                 <div className="flex items-center gap-1 shrink-0">
                   <button
                     onClick={() => setActiveTab('playlists')}
-                    className={`${rActionBtnClass} bg-[#090A0F] border border-white/10 hover:border-amber-500/40 font-medium text-slate-300 hover:text-amber-300 flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
+                    className={`${rActionBtnClass} bg-[#090A0F] border border-white/10 hover:border-amber-500/40 font-medium text-slate-300 hover:text-amber-300 flex items-center justify-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
                     title="Sincronizar listas y pistas con Google Drive"
+                    aria-label="Sincronizar con Google Drive"
                   >
-                    <Cloud className="w-3.5 h-3.5 text-amber-400" />
-                    <span className="hidden sm:inline">Drive</span>
+                    <Cloud className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span className="hidden md:inline">Drive</span>
                   </button>
                   <button
                     onClick={saveQueueAsPlaylist}
-                    className={`${rActionBtnClass} bg-[#090A0F] border border-white/10 hover:border-amber-500/40 font-medium text-slate-200 flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
+                    className={`${rActionBtnClass} bg-[#090A0F] border border-white/10 hover:border-amber-500/40 font-medium text-slate-200 flex items-center justify-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
                     title="Guardar cola actual como lista"
+                    aria-label="Guardar cola actual como lista"
                   >
-                    <FolderPlus className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Guardar</span>
+                    <FolderPlus className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span className="hidden md:inline">Guardar</span>
                   </button>
                 </div>
               )}
@@ -2279,11 +2683,12 @@ export default function App() {
               {rightActiveTab === 'channels' && newCountByChannel.total > 0 && (
                 <button
                   onClick={handleMarkAllEpisodesAsSeen}
-                  className={`${rActionBtnClass} bg-[#090A0F] border border-white/10 hover:border-amber-500/40 font-medium text-amber-400 flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
+                  className={`${rActionBtnClass} bg-[#090A0F] border border-white/10 hover:border-amber-500/40 font-medium text-amber-400 flex items-center justify-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
                   title="Marcar todos los episodios nuevos como vistos"
+                  aria-label="Marcar todos los episodios nuevos como vistos"
                 >
-                  <CheckCheck className="w-3.5 h-3.5" />
-                  <span>Vistos</span>
+                  <CheckCheck className="w-3.5 h-3.5 shrink-0" />
+                  <span className="hidden md:inline">Vistos</span>
                 </button>
               )}
 
@@ -2293,32 +2698,121 @@ export default function App() {
                     setHistory([]);
                     notify('Historial de escucha borrado');
                   }}
-                  className={`${rActionBtnClass} bg-[#090A0F] border border-white/10 hover:border-red-500/40 font-medium text-slate-300 hover:text-red-300 flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
+                  title="Limpiar historial"
+                  aria-label="Limpiar historial"
+                  className={`${rActionBtnClass} bg-[#090A0F] border border-white/10 hover:border-red-500/40 font-medium text-slate-300 hover:text-red-300 flex items-center justify-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  <span>Limpiar</span>
+                  <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                  <span className="hidden md:inline">Limpiar</span>
                 </button>
               )}
             </div>
           </div>
 
-          {/* TAB 1: INTERACTIVE QUEUE WITH REORDERING */}
+          {/* TAB 1: INTERACTIVE QUEUE WITH DIRECT DRAG-AND-DROP & TOUCH REORDERING */}
           {rightActiveTab === 'queue' && (
-            <div className="flex-1 min-h-0 overflow-y-auto custom-scroll p-2.5 sm:p-4 divide-y divide-white/[0.05]">
+            <div
+              ref={queueListRef}
+              className="flex-1 min-h-0 overflow-y-auto custom-scroll p-2.5 sm:p-4 space-y-1"
+            >
               {queue.map((track, idx) => {
                 const isCurrent = idx === currentIndex;
+                const rowKey = `queue-${track.videoId}-${idx}`;
+                const isSelected = selectedVideoKey === rowKey;
+                const isDraggingThis = draggingQueueIdx === idx;
+                const isDragOverThis =
+                  dragOverQueueIdx === idx &&
+                  draggingQueueIdx !== null &&
+                  draggingQueueIdx !== idx;
                 const savedPos = savedPositions[track.videoId] || 0;
+
                 return (
                   <div
-                    key={`${track.videoId}-${idx}`}
+                    key={rowKey}
+                    data-queue-idx={idx}
+                    draggable
+                    onClick={() => setSelectedVideoKey(rowKey)}
+                    onDragStart={(e) => {
+                      activeDragIdxRef.current = idx;
+                      setDraggingQueueIdx(idx);
+                      setDragOverQueueIdx(idx);
+                      e.dataTransfer.effectAllowed = 'move';
+                      e.dataTransfer.setData('text/plain', String(idx));
+                    }}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = 'move';
+                      if (dragOverQueueIdx !== idx) {
+                        setDragOverQueueIdx(idx);
+                      }
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      const fromIdx =
+                        activeDragIdxRef.current ??
+                        parseInt(e.dataTransfer.getData('text/plain'), 10);
+                      if (Number.isFinite(fromIdx) && fromIdx !== idx) {
+                        reorderQueueTrack(fromIdx, idx);
+                      }
+                      activeDragIdxRef.current = null;
+                      setDraggingQueueIdx(null);
+                      setDragOverQueueIdx(null);
+                    }}
+                    onDragEnd={() => {
+                      activeDragIdxRef.current = null;
+                      setDraggingQueueIdx(null);
+                      setDragOverQueueIdx(null);
+                    }}
                     className={`${
                       rightBtnScale === 'sm' ? 'py-1.5 px-2' : 'py-2 px-2.5'
-                    } rounded-xl flex items-center justify-between gap-2.5 transition-colors ${
-                      isCurrent ? 'bg-amber-500/10' : 'hover:bg-white/[0.03]'
+                    } rounded-xl flex items-center justify-between gap-2 transition-all select-none ${
+                      isDraggingThis
+                        ? 'bg-amber-500/20 ring-1 ring-amber-400/70 shadow-xl scale-[1.01] z-20 relative'
+                        : isDragOverThis
+                        ? 'bg-white/[0.06] ring-1 ring-amber-400/50'
+                        : isCurrent
+                        ? 'bg-amber-500/10 border border-amber-500/25'
+                        : isSelected
+                        ? 'bg-white/[0.05] border border-amber-500/30'
+                        : 'hover:bg-white/[0.03] border border-transparent'
                     }`}
                   >
+                    {/* Tactile Drag Handle (Touch & Mouse) */}
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Arrastrar para reordenar ${track.title}`}
+                      title="Arrastra para cambiar el orden en la cola"
+                      onTouchStart={(e) => {
+                        e.stopPropagation();
+                        setSelectedVideoKey(rowKey);
+                        handleStartQueueDrag(idx);
+                      }}
+                      onMouseDown={(e) => {
+                        if (e.button !== 0) return;
+                        e.stopPropagation();
+                        setSelectedVideoKey(rowKey);
+                        handleStartQueueDrag(idx);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'ArrowUp' && idx > 0) {
+                          e.preventDefault();
+                          reorderQueueTrack(idx, idx - 1);
+                        } else if (e.key === 'ArrowDown' && idx < queue.length - 1) {
+                          e.preventDefault();
+                          reorderQueueTrack(idx, idx + 1);
+                        }
+                      }}
+                      className={`${rIconBtnClass} touch-none cursor-grab active:cursor-grabbing text-slate-500 hover:text-amber-400 active:text-amber-300 flex items-center justify-center shrink-0 transition-colors`}
+                    >
+                      <GripVertical className="w-4 h-4" />
+                    </div>
+
                     <button
-                      onClick={() => playTrackAtIndex(idx, true)}
+                      onClick={() => {
+                        setSelectedVideoKey(rowKey);
+                        playTrackAtIndex(idx, true);
+                      }}
                       className="flex-1 min-w-0 flex items-center gap-2.5 text-left cursor-pointer"
                     >
                       <TrackArtwork
@@ -2355,7 +2849,37 @@ export default function App() {
 
                     <div className="flex items-center gap-0.5 shrink-0">
                       <button
-                        onClick={() => setModalTrackForPlaylist(track)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedVideoKey(rowKey);
+                          reorderQueueTrack(idx, idx - 1);
+                        }}
+                        disabled={idx === 0}
+                        className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
+                        title="Subir vídeo"
+                        aria-label="Subir vídeo"
+                      >
+                        <ArrowUp className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedVideoKey(rowKey);
+                          reorderQueueTrack(idx, idx + 1);
+                        }}
+                        disabled={idx === queue.length - 1}
+                        className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
+                        title="Bajar vídeo"
+                        aria-label="Bajar vídeo"
+                      >
+                        <ArrowDown className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedVideoKey(rowKey);
+                          setModalTrackForPlaylist(track);
+                        }}
                         className={`${rIconBtnClass} text-slate-400 hover:text-amber-400 hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
                         title="Añadir a lista"
                         aria-label="Añadir a lista"
@@ -2363,28 +2887,13 @@ export default function App() {
                         <BookmarkPlus className="w-3.5 h-3.5" />
                       </button>
                       <button
-                        onClick={() => moveQueueTrack(idx, 'up')}
-                        disabled={idx === 0}
-                        className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
-                        title="Subir en la cola"
-                        aria-label="Subir en la cola"
-                      >
-                        <ArrowUp className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => moveQueueTrack(idx, 'down')}
-                        disabled={idx === queue.length - 1}
-                        className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
-                        title="Bajar en la cola"
-                        aria-label="Bajar en la cola"
-                      >
-                        <ArrowDown className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => removeQueueTrack(idx)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeQueueTrack(idx);
+                        }}
                         className={`${rIconBtnClass} text-slate-400 hover:text-red-400 hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
-                        title="Quitar de la cola"
-                        aria-label="Quitar de la cola"
+                        title="Eliminar de la cola"
+                        aria-label="Eliminar de la cola"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -2539,24 +3048,48 @@ export default function App() {
                     </p>
                   </div>
                 ) : (
-                  displayedChannelEpisodes.map((ep) => {
+                  displayedChannelEpisodes.map((ep, idx) => {
                     const isNew = isEpisodeNew(ep);
                     const isCurrentlyPlaying =
                       currentTrack?.videoId === ep.videoId && isPlaying;
+                    const rowKey = `channel-${ep.channelId}-${ep.videoId}`;
+                    const isSelected = selectedVideoKey === rowKey;
 
                     return (
                       <div
-                        key={`${ep.channelId}-${ep.videoId}`}
+                        key={rowKey}
+                        draggable
+                        onClick={() => setSelectedVideoKey(rowKey)}
+                        onDragStart={(e) => {
+                          e.dataTransfer.effectAllowed = 'move';
+                          e.dataTransfer.setData('text/plain', String(idx));
+                        }}
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = 'move';
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          const fromIdx = parseInt(e.dataTransfer.getData('text/plain'), 10);
+                          if (Number.isFinite(fromIdx) && fromIdx !== idx) {
+                            handleReorderChannelEpisode(fromIdx, idx);
+                          }
+                        }}
                         className={`${
                           rightBtnScale === 'sm' ? 'py-1.5 px-2' : 'py-2 px-2.5'
-                        } rounded-xl flex items-center justify-between gap-2.5 transition-colors ${
-                          isNew
-                            ? 'bg-amber-500/[0.06] hover:bg-amber-500/[0.1]'
-                            : 'hover:bg-white/[0.03]'
+                        } rounded-xl flex items-center justify-between gap-2 transition-colors ${
+                          isSelected
+                            ? 'bg-white/[0.06] border border-amber-500/30'
+                            : isNew
+                            ? 'bg-amber-500/[0.06] hover:bg-amber-500/[0.1] border border-transparent'
+                            : 'hover:bg-white/[0.03] border border-transparent'
                         }`}
                       >
                         <button
-                          onClick={() => playSpecificTrack(ep, 0)}
+                          onClick={() => {
+                            setSelectedVideoKey(rowKey);
+                            playSpecificTrack(ep, 0);
+                          }}
                           className="flex-1 min-w-0 flex items-center gap-2.5 text-left cursor-pointer"
                         >
                           <TrackArtwork
@@ -2600,10 +3133,39 @@ export default function App() {
                           </div>
                         </button>
 
-                        {/* Episode Quick Actions */}
+                        {/* Episode Quick Actions: Reorganize + Add to Queue + Save to Playlist + Delete */}
                         <div className="flex items-center gap-0.5 shrink-0">
                           <button
-                            onClick={() => {
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedVideoKey(rowKey);
+                              handleReorderChannelEpisode(idx, idx - 1);
+                            }}
+                            disabled={idx === 0}
+                            className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
+                            title="Subir vídeo"
+                            aria-label="Subir vídeo"
+                          >
+                            <ArrowUp className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedVideoKey(rowKey);
+                              handleReorderChannelEpisode(idx, idx + 1);
+                            }}
+                            disabled={idx === displayedChannelEpisodes.length - 1}
+                            className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
+                            title="Bajar vídeo"
+                            aria-label="Bajar vídeo"
+                          >
+                            <ArrowDown className="w-3.5 h-3.5" />
+                          </button>
+
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedVideoKey(rowKey);
                               markEpisodeSeen(ep.videoId);
                               setQueue((prev) => {
                                 if (prev.some((t) => t.videoId === ep.videoId)) {
@@ -2622,12 +3184,28 @@ export default function App() {
                           </button>
 
                           <button
-                            onClick={() => setModalTrackForPlaylist(ep)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedVideoKey(rowKey);
+                              setModalTrackForPlaylist(ep);
+                            }}
                             className={`${rIconBtnClass} text-slate-400 hover:text-amber-400 hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
                             title="Guardar episodio en lista"
                             aria-label="Guardar episodio en lista"
                           >
                             <BookmarkPlus className="w-3.5 h-3.5" />
+                          </button>
+
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteChannelEpisode(ep.channelId, ep.videoId);
+                            }}
+                            className={`${rIconBtnClass} text-slate-400 hover:text-red-400 hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
+                            title="Eliminar vídeo del canal"
+                            aria-label="Eliminar vídeo del canal"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       </div>
@@ -2761,49 +3339,126 @@ export default function App() {
                       </div>
                     ) : (
                       <div className="divide-y divide-white/[0.05]">
-                        {activePlaylist.tracks.map((track, idx) => (
-                          <div
-                            key={`${track.videoId}-${idx}`}
-                            className={`${
-                              rightBtnScale === 'sm' ? 'py-1.5 px-1.5' : 'py-2 px-2'
-                            } flex items-center justify-between gap-2.5 hover:bg-white/[0.03] rounded-xl transition-colors`}
-                          >
-                            <button
-                              onClick={() => handlePlayEntirePlaylist(activePlaylist, idx)}
-                              className="flex-1 min-w-0 flex items-center gap-2.5 text-left cursor-pointer"
+                        {activePlaylist.tracks.map((track, idx) => {
+                          const rowKey = `pl-${activePlaylist.id}-${track.videoId}-${idx}`;
+                          const isSelected = selectedVideoKey === rowKey;
+                          return (
+                            <div
+                              key={rowKey}
+                              draggable
+                              onClick={() => setSelectedVideoKey(rowKey)}
+                              onDragStart={(e) => {
+                                e.dataTransfer.effectAllowed = 'move';
+                                e.dataTransfer.setData('text/plain', String(idx));
+                              }}
+                              onDragOver={(e) => {
+                                e.preventDefault();
+                                e.dataTransfer.dropEffect = 'move';
+                              }}
+                              onDrop={(e) => {
+                                e.preventDefault();
+                                const fromIdx = parseInt(e.dataTransfer.getData('text/plain'), 10);
+                                if (Number.isFinite(fromIdx) && fromIdx !== idx) {
+                                  handleReorderPlaylistTrack(activePlaylist.id, fromIdx, idx);
+                                }
+                              }}
+                              className={`${
+                                rightBtnScale === 'sm' ? 'py-1.5 px-1.5' : 'py-2 px-2'
+                              } flex items-center justify-between gap-2 rounded-xl transition-colors ${
+                                isSelected
+                                  ? 'bg-white/[0.06] border border-amber-500/30'
+                                  : 'hover:bg-white/[0.03] border border-transparent'
+                              }`}
                             >
-                              <TrackArtwork
-                                src={track.thumbnailUrl}
-                                alt={track.title}
-                                className={rRowArtworkClass}
-                              />
-                              <div className="min-w-0 flex-1">
-                                <p
-                                  className={`${
-                                    rightBtnScale === 'sm' ? 'text-xs' : 'text-xs sm:text-sm'
-                                  } font-medium text-slate-100 truncate`}
-                                >
-                                  {track.title}
-                                </p>
-                                <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-400 font-mono-tabular">
-                                  <span className="font-sans truncate">{track.author}</span>
-                                  <span aria-hidden="true">·</span>
-                                  <span>{formatDuration(track.durationSeconds)}</span>
+                              <button
+                                onClick={() => {
+                                  setSelectedVideoKey(rowKey);
+                                  handlePlayEntirePlaylist(activePlaylist, idx);
+                                }}
+                                className="flex-1 min-w-0 flex items-center gap-2.5 text-left cursor-pointer"
+                              >
+                                <TrackArtwork
+                                  src={track.thumbnailUrl}
+                                  alt={track.title}
+                                  className={rRowArtworkClass}
+                                />
+                                <div className="min-w-0 flex-1">
+                                  <p
+                                    className={`${
+                                      rightBtnScale === 'sm' ? 'text-xs' : 'text-xs sm:text-sm'
+                                    } font-medium text-slate-100 truncate`}
+                                  >
+                                    {track.title}
+                                  </p>
+                                  <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-400 font-mono-tabular">
+                                    <span className="font-sans truncate">{track.author}</span>
+                                    <span aria-hidden="true">·</span>
+                                    <span>{formatDuration(track.durationSeconds)}</span>
+                                  </div>
                                 </div>
+                              </button>
+
+                              <div className="flex items-center gap-0.5 shrink-0">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedVideoKey(rowKey);
+                                    handleReorderPlaylistTrack(activePlaylist.id, idx, idx - 1);
+                                  }}
+                                  disabled={idx === 0}
+                                  className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
+                                  title="Subir vídeo en la lista"
+                                  aria-label="Subir vídeo en la lista"
+                                >
+                                  <ArrowUp className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedVideoKey(rowKey);
+                                    handleReorderPlaylistTrack(activePlaylist.id, idx, idx + 1);
+                                  }}
+                                  disabled={idx === activePlaylist.tracks.length - 1}
+                                  className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
+                                  title="Bajar vídeo en la lista"
+                                  aria-label="Bajar vídeo en la lista"
+                                >
+                                  <ArrowDown className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedVideoKey(rowKey);
+                                    setQueue((prev) => {
+                                      if (prev.some((t) => t.videoId === track.videoId)) {
+                                        notify('El vídeo ya está en la cola');
+                                        return prev;
+                                      }
+                                      notify(`Añadido a la cola: ${track.title}`);
+                                      return [...prev, track];
+                                    });
+                                  }}
+                                  className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
+                                  title="Añadir a la cola"
+                                  aria-label="Añadir a la cola"
+                                >
+                                  <Plus className="w-3.5 h-3.5 text-amber-400" />
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleRemoveTrackFromPlaylist(activePlaylist.id, track.videoId);
+                                  }}
+                                  className={`${rIconBtnClass} text-slate-400 hover:text-red-400 hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
+                                  title="Eliminar de la lista"
+                                  aria-label="Eliminar de la lista"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
                               </div>
-                            </button>
-                            <button
-                              onClick={() =>
-                                handleRemoveTrackFromPlaylist(activePlaylist.id, track.videoId)
-                              }
-                              className={`${rIconBtnClass} text-slate-400 hover:text-red-400 flex items-center justify-center transition-colors cursor-pointer`}
-                              title="Quitar de la lista"
-                              aria-label="Quitar de la lista"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        ))}
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -2843,18 +3498,42 @@ export default function App() {
                     </p>
                   </div>
                 ) : (
-                  filteredHistory.map((item) => {
+                  filteredHistory.map((item, idx) => {
                     const resumeSec =
                       savedPositions[item.track.videoId] ?? item.lastPosition ?? 0;
+                    const rowKey = `hist-${item.id}`;
+                    const isSelected = selectedVideoKey === rowKey;
                     return (
                       <div
                         key={item.id}
+                        draggable
+                        onClick={() => setSelectedVideoKey(rowKey)}
+                        onDragStart={(e) => {
+                          e.dataTransfer.effectAllowed = 'move';
+                          e.dataTransfer.setData('text/plain', String(idx));
+                        }}
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = 'move';
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          const fromIdx = parseInt(e.dataTransfer.getData('text/plain'), 10);
+                          if (Number.isFinite(fromIdx) && fromIdx !== idx) {
+                            handleReorderHistoryItem(fromIdx, idx);
+                          }
+                        }}
                         className={`${
                           rightBtnScale === 'sm' ? 'py-1.5 px-1.5' : 'py-2 px-2'
-                        } flex items-center justify-between gap-2.5 hover:bg-white/[0.03] rounded-xl transition-colors`}
+                        } flex items-center justify-between gap-2 rounded-xl transition-colors ${
+                          isSelected
+                            ? 'bg-white/[0.06] border border-amber-500/30'
+                            : 'hover:bg-white/[0.03] border border-transparent'
+                        }`}
                       >
                         <button
                           onClick={() => {
+                            setSelectedVideoKey(rowKey);
                             playSpecificTrack(item.track, resumeSec);
                             if (!isSplitLayout) setActiveTab('player');
                           }}
@@ -2889,14 +3568,74 @@ export default function App() {
                           </div>
                         </button>
 
-                        <div className="flex items-center gap-1 shrink-0">
+                        <div className="flex items-center gap-0.5 shrink-0">
                           <button
-                            onClick={() => setModalTrackForPlaylist(item.track)}
-                            className={`${rIconBtnClass} text-slate-400 hover:text-amber-400 flex items-center justify-center transition-colors cursor-pointer`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedVideoKey(rowKey);
+                              handleReorderHistoryItem(idx, idx - 1);
+                            }}
+                            disabled={idx === 0}
+                            className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
+                            title="Subir en el historial"
+                            aria-label="Subir en el historial"
+                          >
+                            <ArrowUp className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedVideoKey(rowKey);
+                              handleReorderHistoryItem(idx, idx + 1);
+                            }}
+                            disabled={idx === filteredHistory.length - 1}
+                            className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
+                            title="Bajar en el historial"
+                            aria-label="Bajar en el historial"
+                          >
+                            <ArrowDown className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedVideoKey(rowKey);
+                              setQueue((prev) => {
+                                if (prev.some((t) => t.videoId === item.track.videoId)) {
+                                  notify('El vídeo ya está en la cola');
+                                  return prev;
+                                }
+                                notify(`Añadido a la cola: ${item.track.title}`);
+                                return [...prev, item.track];
+                              });
+                            }}
+                            className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
+                            title="Añadir a la cola"
+                            aria-label="Añadir a la cola"
+                          >
+                            <Plus className="w-3.5 h-3.5 text-amber-400" />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedVideoKey(rowKey);
+                              setModalTrackForPlaylist(item.track);
+                            }}
+                            className={`${rIconBtnClass} text-slate-400 hover:text-amber-400 hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
                             title="Guardar en lista"
                             aria-label="Guardar en lista"
                           >
                             <BookmarkPlus className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteHistoryItem(item.id);
+                            }}
+                            className={`${rIconBtnClass} text-slate-400 hover:text-red-400 hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
+                            title="Eliminar del historial"
+                            aria-label="Eliminar del historial"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       </div>
@@ -2952,77 +3691,83 @@ export default function App() {
         </div>
       )}
 
-      {/* Mobile Portrait Bottom Tab Bar (Hidden in Mobile Landscape & Desktop to maximize vertical height) */}
-      {!isSplitLayout && (
-        <nav
-          className="h-14 bg-[#090A0F]/95 backdrop-blur-md border-t border-white/[0.08] grid grid-cols-5 items-center shrink-0 z-30"
-          aria-label="Navegación principal móvil"
+      {/* Unified Bottom Selection Bar: Audio, Cola, Canales, Listas e Historial */}
+      <nav
+        className={`${
+          isMobileLandscape ? 'h-11' : 'h-14'
+        } bg-[#090A0F]/95 backdrop-blur-md border-t border-white/[0.08] grid grid-cols-5 items-center shrink-0 z-30`}
+        aria-label="Navegación principal"
+      >
+        <button
+          onClick={() => setActiveTab('player')}
+          className={`h-full flex flex-col items-center justify-center transition-colors cursor-pointer ${
+            activeTab === 'player' ? 'text-amber-400' : 'text-slate-400 hover:text-slate-200'
+          }`}
         >
-          <button
-            onClick={() => setActiveTab('player')}
-            className={`h-full flex flex-col items-center justify-center transition-colors cursor-pointer ${
-              activeTab === 'player' ? 'text-amber-400' : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Disc3 className="w-5 h-5" />
-            <span className="text-[10px] font-medium tracking-tight mt-0.5 whitespace-nowrap">
-              Audio
-            </span>
-          </button>
+          <Disc3 className="w-5 h-5" />
+          <span className="text-[10px] font-medium tracking-tight mt-0.5 whitespace-nowrap">
+            Audio
+          </span>
+        </button>
 
-          <button
-            onClick={() => setActiveTab('queue')}
-            className={`h-full flex flex-col items-center justify-center transition-colors cursor-pointer ${
-              activeTab === 'queue' ? 'text-amber-400' : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <ListMusic className="w-5 h-5" />
-            <span className="text-[10px] font-medium tracking-tight mt-0.5 whitespace-nowrap">
-              Cola ({queue.length})
-            </span>
-          </button>
+        <button
+          onClick={() => setActiveTab('queue')}
+          className={`h-full flex flex-col items-center justify-center transition-colors cursor-pointer ${
+            (isSplitLayout ? rightActiveTab === 'queue' : activeTab === 'queue')
+              ? 'text-amber-400'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <ListMusic className="w-5 h-5" />
+          <span className="text-[10px] font-medium tracking-tight mt-0.5 whitespace-nowrap">
+            Cola ({queue.length})
+          </span>
+        </button>
 
-          <button
-            onClick={() => setActiveTab('channels')}
-            className={`h-full flex flex-col items-center justify-center transition-colors cursor-pointer ${
-              activeTab === 'channels'
-                ? 'text-amber-400'
-                : newCountByChannel.total > 0
-                ? 'text-amber-300'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Radio className="w-5 h-5" />
-            <span className="text-[10px] font-medium tracking-tight mt-0.5 whitespace-nowrap">
-              Canales {newCountByChannel.total > 0 ? `(${newCountByChannel.total})` : ''}
-            </span>
-          </button>
+        <button
+          onClick={() => setActiveTab('channels')}
+          className={`h-full flex flex-col items-center justify-center transition-colors cursor-pointer ${
+            (isSplitLayout ? rightActiveTab === 'channels' : activeTab === 'channels')
+              ? 'text-amber-400'
+              : newCountByChannel.total > 0
+              ? 'text-amber-300'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <Radio className="w-5 h-5" />
+          <span className="text-[10px] font-medium tracking-tight mt-0.5 whitespace-nowrap">
+            Canales {newCountByChannel.total > 0 ? `(${newCountByChannel.total})` : ''}
+          </span>
+        </button>
 
-          <button
-            onClick={() => setActiveTab('playlists')}
-            className={`h-full flex flex-col items-center justify-center transition-colors cursor-pointer ${
-              activeTab === 'playlists' ? 'text-amber-400' : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <FolderPlus className="w-5 h-5" />
-            <span className="text-[10px] font-medium tracking-tight mt-0.5 whitespace-nowrap">
-              Listas
-            </span>
-          </button>
+        <button
+          onClick={() => setActiveTab('playlists')}
+          className={`h-full flex flex-col items-center justify-center transition-colors cursor-pointer ${
+            (isSplitLayout ? rightActiveTab === 'playlists' : activeTab === 'playlists')
+              ? 'text-amber-400'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <FolderPlus className="w-5 h-5" />
+          <span className="text-[10px] font-medium tracking-tight mt-0.5 whitespace-nowrap">
+            Listas
+          </span>
+        </button>
 
-          <button
-            onClick={() => setActiveTab('history')}
-            className={`h-full flex flex-col items-center justify-center transition-colors cursor-pointer ${
-              activeTab === 'history' ? 'text-amber-400' : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <History className="w-5 h-5" />
-            <span className="text-[10px] font-medium tracking-tight mt-0.5 whitespace-nowrap">
-              Historial
-            </span>
-          </button>
-        </nav>
-      )}
+        <button
+          onClick={() => setActiveTab('history')}
+          className={`h-full flex flex-col items-center justify-center transition-colors cursor-pointer ${
+            (isSplitLayout ? rightActiveTab === 'history' : activeTab === 'history')
+              ? 'text-amber-400'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <History className="w-5 h-5" />
+          <span className="text-[10px] font-medium tracking-tight mt-0.5 whitespace-nowrap">
+            Historial
+          </span>
+        </button>
+      </nav>
 
       {/* Modal to Add any Track to Custom Playlists */}
       <AddToPlaylistModal

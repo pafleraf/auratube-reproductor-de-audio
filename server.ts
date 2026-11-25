@@ -216,54 +216,17 @@ async function fetchPipedData(videoId: string): Promise<{
   return null;
 }
 
-// Pre-computed in-memory WAV cache per chord index for <2ms HTTP Range responses
-const wavBufferCache = new Map<number, Buffer>();
+// Pre-computed in-memory silent keep-alive WAV carrier for <2ms HTTP Range responses
+// Keeps OS MediaSession & lock-screen notification controls active without emitting audible synth sound
+let silentCarrierWavCache: Buffer | null = null;
 
-function getOrBuildWavBuffer(chordIndex: number, durationSeconds = 180): Buffer {
-  const cached = wavBufferCache.get(chordIndex);
-  if (cached) return cached;
+function getOrBuildWavBuffer(_chordIndex = 0, durationSeconds = 180): Buffer {
+  if (silentCarrierWavCache) return silentCarrierWavCache;
 
-  const sampleRate = 16000;
-  const numChannels = 2;
+  const sampleRate = 8000;
+  const numChannels = 1;
   const bitsPerSample = 16;
   const bytesPerSample = (bitsPerSample / 8) * numChannels;
-  // Build an 8-second seamless harmonic loop and tile it across durationSeconds for instant generation
-  const loopSeconds = 8;
-  const loopSamples = sampleRate * loopSeconds;
-  const loopBytes = loopSamples * bytesPerSample;
-  const loopBuf = Buffer.alloc(loopBytes);
-
-  const baseNotes = [130.81, 146.83, 164.81, 174.61, 196.0, 220.0];
-  const rootFreq = baseNotes[chordIndex % baseNotes.length];
-  const fifthFreq = rootFreq * 1.5;
-  const octaveFreq = rootFreq * 2.0;
-  const thirdFreq = rootFreq * 1.25;
-
-  for (let i = 0; i < loopSamples; i++) {
-    const t = i / sampleRate;
-    const lfo1 = 0.55 + 0.45 * Math.sin(2 * Math.PI * (1 / loopSeconds) * t);
-    const lfo2 = 0.5 + 0.5 * Math.cos(2 * Math.PI * (2 / loopSeconds) * t);
-    const pulse = Math.exp(-((t * 0.5) % 1) * 3.0);
-
-    const waveL =
-      0.32 * Math.sin(2 * Math.PI * rootFreq * t) +
-      0.22 * lfo1 * Math.sin(2 * Math.PI * fifthFreq * t) +
-      0.16 * lfo2 * Math.sin(2 * Math.PI * thirdFreq * t) +
-      0.12 * pulse * Math.sin(2 * Math.PI * octaveFreq * t);
-
-    const waveR =
-      0.32 * Math.sin(2 * Math.PI * rootFreq * t + 0.2) +
-      0.22 * lfo2 * Math.sin(2 * Math.PI * fifthFreq * t + 0.4) +
-      0.16 * lfo1 * Math.sin(2 * Math.PI * thirdFreq * t - 0.3) +
-      0.12 * pulse * Math.sin(2 * Math.PI * octaveFreq * t);
-
-    const leftVal = Math.max(-1, Math.min(1, waveL)) * 10500;
-    const rightVal = Math.max(-1, Math.min(1, waveR)) * 10500;
-
-    loopBuf.writeInt16LE(Math.round(leftVal), i * 4);
-    loopBuf.writeInt16LE(Math.round(rightVal), i * 4 + 2);
-  }
-
   const totalSamples = sampleRate * durationSeconds;
   const dataSize = totalSamples * bytesPerSample;
   const totalFileSize = 44 + dataSize;
@@ -284,23 +247,17 @@ function getOrBuildWavBuffer(chordIndex: number, durationSeconds = 180): Buffer 
   fullBuffer.write('data', 36);
   fullBuffer.writeUInt32LE(dataSize, 40);
 
-  let offset = 44;
-  while (offset < totalFileSize) {
-    const copyLen = Math.min(loopBytes, totalFileSize - offset);
-    loopBuf.copy(fullBuffer, offset, 0, copyLen);
-    offset += copyLen;
+  // Sub-threshold 1-LSB alternating keep-alive (-90 dB, completely inaudible) so mobile OS does not suspend audio session
+  for (let i = 0; i < totalSamples; i += 64) {
+    fullBuffer.writeInt16LE(i % 128 === 0 ? 1 : -1, 44 + i * 2);
   }
 
-  wavBufferCache.set(chordIndex, fullBuffer);
+  silentCarrierWavCache = fullBuffer;
   return fullBuffer;
 }
 
-function streamSynthesizedAudio(req: Request, res: Response, videoId: string) {
-  let hash = 0;
-  for (let i = 0; i < videoId.length; i++) {
-    hash = (hash * 31 + videoId.charCodeAt(i)) & 0x7fffffff;
-  }
-  const fullBuffer = getOrBuildWavBuffer(hash % 6, 180);
+function streamSynthesizedAudio(req: Request, res: Response, _videoId: string) {
+  const fullBuffer = getOrBuildWavBuffer(0, 180);
   const totalFileSize = fullBuffer.length;
 
   let startByte = 0;
@@ -525,7 +482,19 @@ async function startServer() {
     if (!cleanName) cleanName = rawQuery;
     const displayTitle = cleanName.startsWith('@') ? cleanName.slice(1) : cleanName;
     const slug = displayTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'channel';
-    const channelId = cleanName.startsWith('UC') && cleanName.length >= 20 ? cleanName : `ch-${slug}`;
+
+    const KNOWN_CHANNEL_IDS: Record<string, string> = {
+      chillhop: 'UCOxqgCwgOqC2lMqC5PYz_Dg',
+      'chillhop-music': 'UCOxqgCwgOqC2lMqC5PYz_Dg',
+      chillhopmusic: 'UCOxqgCwgOqC2lMqC5PYz_Dg',
+      'lofi-girl': 'UCSJ4gkVC6NrvII8umztf0Ow',
+      lofigirl: 'UCSJ4gkVC6NrvII8umztf0Ow',
+    };
+
+    const channelId =
+      cleanName.startsWith('UC') && cleanName.length >= 20
+        ? cleanName
+        : KNOWN_CHANNEL_IDS[slug] || `ch-${slug}`;
 
     interface EpisodeItem {
       videoId: string;
@@ -571,7 +540,7 @@ async function startServer() {
               episodes.push({
                 videoId: vid,
                 url: `https://www.youtube.com/watch?v=${vid}`,
-                title: epTitle.replace(/&amp;/g, '&').replace(/&quot;/g, '"'),
+                title: epTitle.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'"),
                 author: resolvedName,
                 channelId,
                 channelName: resolvedName,
@@ -639,7 +608,7 @@ async function startServer() {
 
     // Attempt C: Guaranteed fallback episodes so subscribing always delivers playable background tracks
     if (episodes.length === 0) {
-      const sampleIds = ['jfKfPfyJRdk', 'DWcJFNfaw9c', '4xDzrJKXOOY', '5qap5aO4i9A'];
+      const sampleIds = ['AodSJJ-ZvuI', '34GOO-dOZNU', 'q0fBw_zgcCk', 'DWcJFNfaw9c'];
       let hash = 0;
       for (let i = 0; i < slug.length; i++) {
         hash = (hash * 31 + slug.charCodeAt(i)) & 0x7fffffff;
@@ -653,7 +622,7 @@ async function startServer() {
         {
           videoId: primaryVid,
           url: `https://www.youtube.com/watch?v=${primaryVid}`,
-          title: `${resolvedName} — Episodio Especial: Sesión de Audio & Análisis`,
+          title: `${resolvedName} — Chillhop Sanctuary ❄️ [cozy beats / winter lofi mix]`,
           author: resolvedName,
           channelId,
           channelName: resolvedName,
@@ -661,12 +630,12 @@ async function startServer() {
           thumbnailUrl: `https://i.ytimg.com/vi/${primaryVid}/hqdefault.jpg`,
           audioStreamUrl: `/api/youtube/stream?id=${primaryVid}&duration=380`,
           addedAt: Date.now(),
-          publishedAt: Date.now() - 600 * 1000, // Nuevo (hace 10 min)
+          publishedAt: Date.now() - 600 * 1000,
         },
         {
           videoId: secondaryVid,
           url: `https://www.youtube.com/watch?v=${secondaryVid}`,
-          title: `${resolvedName} — En Directo: Conversación y Novedades de la Semana`,
+          title: `${resolvedName} — Forest Retreat 🌳 [lofi beats / chillhop]`,
           author: resolvedName,
           channelId,
           channelName: resolvedName,
@@ -674,12 +643,12 @@ async function startServer() {
           thumbnailUrl: `https://i.ytimg.com/vi/${secondaryVid}/hqdefault.jpg`,
           audioStreamUrl: `/api/youtube/stream?id=${secondaryVid}&duration=420`,
           addedAt: Date.now(),
-          publishedAt: Date.now() - 2400 * 1000, // Nuevo (hace 40 min)
+          publishedAt: Date.now() - 2400 * 1000,
         },
         {
           videoId: tertiaryVid,
           url: `https://www.youtube.com/watch?v=${tertiaryVid}`,
-          title: `${resolvedName} — Archivo Acústico & Resumen Mensual`,
+          title: `${resolvedName} — Essentials Winter Session`,
           author: resolvedName,
           channelId,
           channelName: resolvedName,
@@ -696,7 +665,7 @@ async function startServer() {
       channelId,
       name: resolvedName,
       handle: resolvedHandle,
-      avatarUrl: avatarUrl || 'https://i.ytimg.com/vi/jfKfPfyJRdk/hqdefault.jpg',
+      avatarUrl: avatarUrl || 'https://i.ytimg.com/vi/AodSJJ-ZvuI/hqdefault.jpg',
       subscribedAt: Date.now(),
       lastCheckedAt: Date.now(),
       episodes,
