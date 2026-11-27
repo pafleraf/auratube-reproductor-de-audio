@@ -337,38 +337,38 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
       <div
         className={`${
           compact ? 'px-2.5 py-1.5' : 'p-3'
-        } rounded-xl bg-[#090A0F] border border-white/10 flex flex-row items-center justify-between gap-2 flex-wrap`}
+        } rounded-xl bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 flex flex-row items-center justify-between gap-2 flex-wrap transition-colors`}
       >
         <div className="min-w-0 flex items-center gap-2">
           <div
             className={`${
               compact ? 'w-7 h-7 rounded-lg' : 'w-9 h-9 rounded-xl'
-            } bg-amber-500/10 border border-amber-500/30 flex items-center justify-center shrink-0`}
+            } bg-amber-500/15 dark:bg-amber-500/10 border border-amber-500/35 dark:border-amber-500/30 flex items-center justify-center shrink-0`}
           >
             {isBusy ? (
-              <Loader2 className="w-3.5 h-3.5 text-amber-400 animate-spin" />
+              <Loader2 className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 animate-spin" />
             ) : (
-              <Cloud className="w-3.5 h-3.5 text-amber-400" />
+              <Cloud className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
             )}
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-xs font-semibold text-white whitespace-nowrap">
+              <span className="text-xs font-semibold text-slate-900 dark:text-white whitespace-nowrap">
                 Google Drive
               </span>
               {user && hasToken && (
                 <>
-                  <span aria-hidden="true" className="text-slate-600">
+                  <span aria-hidden="true" className="text-slate-400 dark:text-slate-600">
                     ·
                   </span>
-                  <span className="text-[11px] text-amber-400 font-medium truncate max-w-[140px]">
+                  <span className="text-[11px] text-amber-600 dark:text-amber-400 font-medium truncate max-w-[140px]">
                     {user.email || user.displayName}
                   </span>
                 </>
               )}
             </div>
             {!compact && (
-              <p className="text-[11px] text-slate-400 truncate">
+              <p className="text-[11px] text-slate-600 dark:text-slate-400 truncate">
                 {isBusy
                   ? busyLabel
                   : remoteFile
@@ -443,10 +443,10 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
                 type="button"
                 onClick={handlePrepareRestore}
                 disabled={isBusy}
-                className={`${btnHeightClass} rounded-xl bg-[#12151E] border border-white/10 hover:border-amber-500/40 disabled:opacity-40 text-slate-200 font-medium flex items-center gap-1 transition-colors whitespace-nowrap cursor-pointer`}
+                className={`${btnHeightClass} rounded-xl bg-white dark:bg-[#12151E] border border-slate-200 dark:border-white/10 hover:border-amber-500/50 disabled:opacity-40 text-slate-800 dark:text-slate-200 font-medium flex items-center gap-1 transition-colors whitespace-nowrap cursor-pointer`}
                 title="Restaurar o importar listas y pistas desde Google Drive"
               >
-                <CloudDownload className="w-3.5 h-3.5 text-amber-400" />
+                <CloudDownload className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
                 <span>Restaurar</span>
               </button>
 
@@ -457,7 +457,7 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
                   await checkRemoteBackup(token);
                 }}
                 disabled={isBusy}
-                className={`${iconBtnClass} rounded-xl bg-[#12151E] border border-white/10 hover:border-white/25 text-slate-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer`}
+                className={`${iconBtnClass} rounded-xl bg-white dark:bg-[#12151E] border border-slate-200 dark:border-white/10 hover:border-slate-300 dark:hover:border-white/25 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white flex items-center justify-center transition-colors cursor-pointer`}
                 title="Comprobar estado en Google Drive"
                 aria-label="Comprobar estado en Google Drive"
               >
@@ -469,7 +469,7 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
                   type="button"
                   onClick={handlePrepareDelete}
                   disabled={isBusy}
-                  className={`${iconBtnClass} rounded-xl bg-[#12151E] border border-white/10 hover:border-red-500/40 text-slate-400 hover:text-red-400 flex items-center justify-center transition-colors cursor-pointer`}
+                  className={`${iconBtnClass} rounded-xl bg-white dark:bg-[#12151E] border border-slate-200 dark:border-white/10 hover:border-red-500/40 text-slate-500 dark:text-slate-400 hover:text-red-500 dark:hover:text-red-400 flex items-center justify-center transition-colors cursor-pointer`}
                   title="Eliminar copia guardada en Google Drive"
                   aria-label="Eliminar copia en Google Drive"
                 >
@@ -481,7 +481,7 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
                 type="button"
                 onClick={handleDisconnect}
                 disabled={isBusy}
-                className={`${iconBtnClass} rounded-xl bg-[#12151E] border border-white/10 hover:border-white/25 text-slate-400 hover:text-slate-200 flex items-center justify-center transition-colors cursor-pointer`}
+                className={`${iconBtnClass} rounded-xl bg-white dark:bg-[#12151E] border border-slate-200 dark:border-white/10 hover:border-slate-300 dark:hover:border-white/25 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 flex items-center justify-center transition-colors cursor-pointer`}
                 title="Desconectar cuenta de Google"
                 aria-label="Desconectar cuenta de Google"
               >
@@ -497,13 +497,13 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
         typeof document !== 'undefined' &&
         createPortal(
           <div
-            className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-sm flex items-center justify-center p-2.5 sm:p-4 overflow-y-auto"
+            className="fixed inset-0 z-[100] bg-slate-900/60 dark:bg-black/80 backdrop-blur-sm flex items-center justify-center p-2.5 sm:p-4 overflow-y-auto"
             role="dialog"
             aria-modal="true"
             onClick={() => setPendingConfirm(null)}
           >
             <div
-              className="w-full max-w-md max-h-[92dvh] overflow-y-auto custom-scroll rounded-2xl bg-[#12151E] border border-white/15 shadow-2xl p-4 sm:p-5 space-y-3.5 my-auto"
+              className="w-full max-w-md max-h-[92dvh] overflow-y-auto custom-scroll rounded-2xl bg-white dark:bg-[#12151E] border border-slate-200 dark:border-white/15 shadow-2xl p-4 sm:p-5 space-y-3.5 my-auto"
               onClick={(e) => e.stopPropagation()}
             >
             <div className="flex items-start justify-between gap-3">
@@ -511,8 +511,8 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
                 <div
                   className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
                     pendingConfirm.type === 'delete'
-                      ? 'bg-red-500/15 border border-red-500/30 text-red-400'
-                      : 'bg-amber-500/15 border border-amber-500/30 text-amber-400'
+                      ? 'bg-red-500/15 border border-red-500/30 text-red-500 dark:text-red-400'
+                      : 'bg-amber-500/15 border border-amber-500/30 text-amber-600 dark:text-amber-400'
                   }`}
                 >
                   {pendingConfirm.type === 'delete' ? (
@@ -524,7 +524,7 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
                   )}
                 </div>
                 <div>
-                  <h3 className="text-base font-bold font-display text-white">
+                  <h3 className="text-base font-bold font-display text-slate-900 dark:text-white">
                     {pendingConfirm.type === 'upload'
                       ? pendingConfirm.existingFile
                         ? 'Confirmar actualización en Google Drive'
@@ -533,7 +533,7 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
                       ? 'Confirmar eliminación en Google Drive'
                       : 'Restaurar desde Google Drive'}
                   </h3>
-                  <p className="text-xs text-slate-400 font-mono-tabular">
+                  <p className="text-xs text-slate-500 dark:text-slate-400 font-mono-tabular">
                     Archivo: {DRIVE_BACKUP_FILENAME}
                   </p>
                 </div>
@@ -542,7 +542,7 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
               <button
                 type="button"
                 onClick={() => setPendingConfirm(null)}
-                className="min-h-[36px] min-w-[36px] rounded-lg text-slate-400 hover:text-white hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer"
+                className="min-h-[36px] min-w-[36px] rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer"
                 aria-label="Cerrar"
               >
                 <X className="w-4 h-4" />
@@ -551,7 +551,7 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
 
             {pendingConfirm.type === 'upload' && (
               <>
-                <div className="p-3.5 rounded-xl bg-[#090A0F] border border-white/10 space-y-2 text-xs text-slate-300">
+                <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 space-y-2 text-xs text-slate-600 dark:text-slate-300">
                   <p>
                     {pendingConfirm.existingFile
                       ? `Se sobrescribirá tu copia anterior en Google Drive (modificada ${formatRelativeTime(
@@ -561,7 +561,7 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
                         )}) con los siguientes datos actuales:`
                       : 'Se creará un nuevo archivo de respaldo en tu Google Drive con los siguientes datos:'}
                   </p>
-                  <ul className="space-y-1 text-slate-200 font-medium pt-1">
+                  <ul className="space-y-1 text-slate-800 dark:text-slate-200 font-medium pt-1">
                     <li>
                       · {playlists.length} listas de reproducción ({totalSavedTracks}{' '}
                       pistas guardadas)
@@ -578,7 +578,7 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
                   <button
                     type="button"
                     onClick={() => setPendingConfirm(null)}
-                    className="min-h-[42px] px-4 rounded-xl bg-[#090A0F] border border-white/10 hover:border-white/25 text-xs font-medium text-slate-300 transition-colors cursor-pointer"
+                    className="min-h-[42px] px-4 rounded-xl bg-slate-100 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 hover:border-slate-300 dark:hover:border-white/25 text-xs font-medium text-slate-700 dark:text-slate-300 transition-colors cursor-pointer"
                   >
                     Cancelar
                   </button>
@@ -600,15 +600,15 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
 
             {pendingConfirm.type === 'delete' && (
               <>
-                <div className="p-3.5 rounded-xl bg-[#090A0F] border border-red-500/20 space-y-1.5 text-xs text-slate-300">
+                <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#090A0F] border border-red-500/30 dark:border-red-500/20 space-y-1.5 text-xs text-slate-700 dark:text-slate-300">
                   <p>
                     ¿Estás seguro de que deseas eliminar permanentemente el archivo{' '}
-                    <span className="text-white font-semibold">
+                    <span className="text-slate-900 dark:text-white font-semibold">
                       {pendingConfirm.existingFile.name}
                     </span>{' '}
                     de tu Google Drive?
                   </p>
-                  <p className="text-slate-400">
+                  <p className="text-slate-500 dark:text-slate-400">
                     Tus listas locales en este dispositivo no se borrarán, pero se eliminará el respaldo en la nube.
                   </p>
                 </div>
@@ -617,7 +617,7 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
                   <button
                     type="button"
                     onClick={() => setPendingConfirm(null)}
-                    className="min-h-[42px] px-4 rounded-xl bg-[#090A0F] border border-white/10 hover:border-white/25 text-xs font-medium text-slate-300 transition-colors cursor-pointer"
+                    className="min-h-[42px] px-4 rounded-xl bg-slate-100 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 hover:border-slate-300 dark:hover:border-white/25 text-xs font-medium text-slate-700 dark:text-slate-300 transition-colors cursor-pointer"
                   >
                     Cancelar
                   </button>
@@ -635,7 +635,7 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
 
             {pendingConfirm.type === 'restore' && (
               <>
-                <div className="p-3.5 rounded-xl bg-[#090A0F] border border-white/10 space-y-2 text-xs text-slate-300">
+                <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 space-y-2 text-xs text-slate-600 dark:text-slate-300">
                   <p>
                     Copia encontrada en Google Drive (guardada{' '}
                     {formatRelativeTime(
@@ -646,7 +646,7 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
                     )}
                     ):
                   </p>
-                  <ul className="space-y-1 text-slate-200 font-medium pt-1">
+                  <ul className="space-y-1 text-slate-800 dark:text-slate-200 font-medium pt-1">
                     <li>
                       · {pendingConfirm.downloadedBackup.playlists.length} listas de
                       reproducción (
@@ -671,7 +671,7 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
                   <button
                     type="button"
                     onClick={() => setPendingConfirm(null)}
-                    className="min-h-[42px] px-3.5 rounded-xl bg-[#090A0F] border border-white/10 hover:border-white/25 text-xs font-medium text-slate-300 transition-colors cursor-pointer"
+                    className="min-h-[42px] px-3.5 rounded-xl bg-slate-100 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 hover:border-slate-300 dark:hover:border-white/25 text-xs font-medium text-slate-700 dark:text-slate-300 transition-colors cursor-pointer"
                   >
                     Cancelar
                   </button>
@@ -682,7 +682,7 @@ export const GoogleDriveSyncBar: React.FC<GoogleDriveSyncBarProps> = ({
                       setPendingConfirm(null);
                       onRestoreLibrary(data, 'merge');
                     }}
-                    className="min-h-[42px] px-3.5 rounded-xl bg-[#090A0F] border border-amber-500/40 hover:bg-amber-500/15 text-amber-300 font-semibold text-xs transition-colors cursor-pointer"
+                    className="min-h-[42px] px-3.5 rounded-xl bg-amber-500/10 dark:bg-[#090A0F] border border-amber-500/40 hover:bg-amber-500/20 text-amber-700 dark:text-amber-300 font-semibold text-xs transition-colors cursor-pointer"
                   >
                     Combinar con actuales
                   </button>

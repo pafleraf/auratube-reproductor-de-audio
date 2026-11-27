@@ -13,10 +13,18 @@
     width: 100%;
     overflow: hidden;
     font-family: var(--font-sans);
-    background-color: #090A0F;
-    color: #F1F5F9;
+    background-color: #F1F5F9;
+    color: #0F172A;
     letter-spacing: 0.01em;
     -webkit-tap-highlight-color: transparent;
+    transition: background-color 300ms ease, color 300ms ease;
+  }
+
+  html.dark,
+  html.dark body,
+  html.dark #root {
+    background-color: #090A0F;
+    color: #F1F5F9;
   }
 
   h1, h2, h3, h4, .font-display {
@@ -39,11 +47,11 @@
   background: transparent;
 }
 .custom-scroll::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.18);
+  background: rgba(148, 163, 184, 0.25);
   border-radius: 9999px;
 }
 .custom-scroll::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.35);
+  background: rgba(148, 163, 184, 0.45);
 }
 
 /* Tactile audio range slider */
@@ -81,14 +89,14 @@ input[type="range"].audio-scrubber:active::-webkit-slider-thumb {
   -webkit-user-select: none;
   -ms-user-select: none;
   -webkit-appearance: none;
-  background-color: #131314;
+  background-color: #FFFFFF;
   background-image: none;
-  border: 1px solid #8e918f;
+  border: 1px solid #CBD5E1;
   -webkit-border-radius: 12px;
   border-radius: 12px;
   -webkit-box-sizing: border-box;
   box-sizing: border-box;
-  color: #e3e3e3;
+  color: #1E293B;
   cursor: pointer;
   font-family: 'Roboto', arial, sans-serif;
   font-size: 13px;
@@ -106,6 +114,12 @@ input[type="range"].audio-scrubber:active::-webkit-slider-thumb {
   width: auto;
   max-width: 400px;
   min-width: min-content;
+}
+
+html.dark .gsi-material-button {
+  background-color: #131314;
+  border-color: #8e918f;
+  color: #e3e3e3;
 }
 
 .gsi-material-button .gsi-material-button-icon {
@@ -295,6 +309,121 @@ input[type="range"].audio-scrubber:active::-webkit-slider-thumb {
   }
 }
 
+/* Directional 220ms Slide + Fade Tab Transitions (Audio, Cola, Canales, Listas, Historial) */
+@keyframes tabSlideFadeForward {
+  0% {
+    opacity: 0;
+    transform: translate3d(18px, 0, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
 
+@keyframes tabSlideFadeBackward {
+  0% {
+    opacity: 0;
+    transform: translate3d(-18px, 0, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.tab-transition-forward {
+  animation: tabSlideFadeForward 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  will-change: transform, opacity;
+}
+
+.tab-transition-backward {
+  animation: tabSlideFadeBackward 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  will-change: transform, opacity;
+}
+
+/* Smooth Slide-In Entrance Animation for Queue Items & Newly Added Tracks */
+@keyframes queueItemSlideIn {
+  0% {
+    opacity: 0;
+    transform: translate3d(-14px, 6px, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes queueNewTrackSlideIn {
+  0% {
+    opacity: 0;
+    transform: translate3d(-24px, 4px, 0) scale(0.98);
+    background-color: rgba(245, 158, 11, 0.22);
+    box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.5);
+  }
+  60% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+    background-color: rgba(245, 158, 11, 0.14);
+    box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.35);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+.queue-item-slide-in {
+  animation: queueItemSlideIn 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  will-change: transform, opacity;
+}
+
+.queue-item-newly-added {
+  animation: queueNewTrackSlideIn 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  will-change: transform, opacity;
+}
+
+/* Bottom Navigation Sliding Amber Capsule & Active Icon Lift Animation */
+.nav-sliding-carrier {
+  transition: transform 270ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+@keyframes navIconActivatePop {
+  0% {
+    transform: translate3d(0, 2px, 0) scale(0.92);
+  }
+  55% {
+    transform: translate3d(0, -3.5px, 0) scale(1.16);
+  }
+  100% {
+    transform: translate3d(0, -2px, 0) scale(1.1);
+  }
+}
+
+.nav-icon-active {
+  animation: navIconActivatePop 280ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  filter: drop-shadow(0 2px 6px rgba(245, 158, 11, 0.35));
+  will-change: transform;
+}
+
+.nav-icon-inactive {
+  transform: translate3d(0, 0, 0) scale(0.96);
+  transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1), opacity 220ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-transition-forward,
+  .tab-transition-backward,
+  .queue-item-slide-in,
+  .queue-item-newly-added,
+  .nav-sliding-carrier,
+  .nav-icon-active,
+  .nav-icon-inactive {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+    transform: none !important;
+  }
+}
 
 

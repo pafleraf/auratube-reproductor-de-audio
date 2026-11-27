@@ -14,7 +14,42 @@ interface YTPlayer {
   getCurrentTime: () => number;
   getDuration: () => number;
   getPlayerState: () => number;
+  getPlaybackQuality?: () => string;
   destroy: () => void;
+}
+
+export interface AudioQualityEstimate {
+  bitrateKbps: number;
+  codec: string;
+  tierLabel: 'HQ' | 'Estándar' | 'Ahorro';
+  rawQuality: string;
+}
+
+export function mapYouTubeQualityToAudioEstimate(rawQuality?: string): AudioQualityEstimate {
+  const q = (rawQuality || '').toLowerCase();
+  if (q === 'small' || q === 'tiny') {
+    return {
+      bitrateKbps: 64,
+      codec: 'HE-AAC',
+      tierLabel: 'Ahorro',
+      rawQuality: q || 'small',
+    };
+  }
+  if (q === 'medium' || q === 'large') {
+    return {
+      bitrateKbps: 128,
+      codec: 'AAC',
+      tierLabel: 'Estándar',
+      rawQuality: q,
+    };
+  }
+  // hd720, hd1080, highres, default, or unknown -> YouTube dash audio itag 251 (Opus ~160 kbps)
+  return {
+    bitrateKbps: 160,
+    codec: 'Opus',
+    tierLabel: 'HQ',
+    rawQuality: q || 'hd1080',
+  };
 }
 
 declare global {
@@ -30,6 +65,7 @@ declare global {
           events?: {
             onReady?: (event: { target: YTPlayer }) => void;
             onStateChange?: (event: { data: number; target: YTPlayer }) => void;
+            onPlaybackQualityChange?: (event: { data: string; target: YTPlayer }) => void;
             onError?: (event: { data: number }) => void;
           };
         }
@@ -56,6 +92,7 @@ interface YouTubeAudioBridgeProps {
   onBridgeActiveChange: (active: boolean) => void;
   onTimeProgress: (currentTime: number, duration: number) => void;
   onEnded: () => void;
+  onAudioQualityChange?: (quality: AudioQualityEstimate) => void;
 }
 
 export const YouTubeAudioBridge: React.FC<YouTubeAudioBridgeProps> = ({
@@ -68,6 +105,7 @@ export const YouTubeAudioBridge: React.FC<YouTubeAudioBridgeProps> = ({
   onBridgeActiveChange,
   onTimeProgress,
   onEnded,
+  onAudioQualityChange,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const playerRef = useRef<YTPlayer | null>(null);
@@ -84,6 +122,19 @@ export const YouTubeAudioBridge: React.FC<YouTubeAudioBridgeProps> = ({
   const volumeRef = useRef(volume);
   const pendingStartSecRef = useRef(0);
   const bridgeActiveRef = useRef(false);
+
+  // Callback refs to prevent stale closures inside the singleton YT.Player event listeners & pollTimer
+  const onBridgeActiveChangeRef = useRef(onBridgeActiveChange);
+  const onTimeProgressRef = useRef(onTimeProgress);
+  const onEndedRef = useRef(onEnded);
+  const onAudioQualityChangeRef = useRef(onAudioQualityChange);
+
+  useEffect(() => {
+    onBridgeActiveChangeRef.current = onBridgeActiveChange;
+    onTimeProgressRef.current = onTimeProgress;
+    onEndedRef.current = onEnded;
+    onAudioQualityChangeRef.current = onAudioQualityChange;
+  }, [onBridgeActiveChange, onTimeProgress, onEnded, onAudioQualityChange]);
 
   useEffect(() => {
     desiredVideoIdRef.current = videoId;
@@ -146,6 +197,7 @@ export const YouTubeAudioBridge: React.FC<YouTubeAudioBridgeProps> = ({
   // Load YouTube IFrame API script once
   useEffect(() => {
     let pollTimer: ReturnType<typeof setInterval> | null = null;
+    let visibilityTimer: ReturnType<typeof setTimeout> | null = null;
 
     const initPlayer = () => {
       if (!containerRef.current || !window.YT?.Player || playerRef.current) return;
@@ -202,26 +254,33 @@ export const YouTubeAudioBridge: React.FC<YouTubeAudioBridgeProps> = ({
                 return;
               }
               bridgeActiveRef.current = true;
-              onBridgeActiveChange(true);
+              onBridgeActiveChangeRef.current(true);
+              const rawQ = e.target.getPlaybackQuality?.() || 'hd1080';
+              onAudioQualityChangeRef.current?.(mapYouTubeQualityToAudioEstimate(rawQ));
               const dur = e.target.getDuration?.() || 0;
               const cur = e.target.getCurrentTime?.() || 0;
               if (dur > 0) {
-                onTimeProgress(cur, dur);
+                onTimeProgressRef.current(cur, dur);
               }
             } else if (e.data === 2 || e.data === 5) {
+              const rawQ = e.target.getPlaybackQuality?.() || 'hd1080';
+              onAudioQualityChangeRef.current?.(mapYouTubeQualityToAudioEstimate(rawQ));
               const dur = e.target.getDuration?.() || 0;
               const cur = e.target.getCurrentTime?.() || 0;
               if (dur > 0) {
-                onTimeProgress(cur, dur);
+                onTimeProgressRef.current(cur, dur);
               }
             } else if (e.data === 0) {
-              onEnded();
+              onEndedRef.current();
             }
+          },
+          onPlaybackQualityChange: (e) => {
+            onAudioQualityChangeRef.current?.(mapYouTubeQualityToAudioEstimate(e.data));
           },
           onError: () => {
             // Embed disabled or restricted for this videoId -> fall back to server HTML5 <audio> stream
             bridgeActiveRef.current = false;
-            onBridgeActiveChange(false);
+            onBridgeActiveChangeRef.current(false);
           },
         },
       });
@@ -262,7 +321,11 @@ export const YouTubeAudioBridge: React.FC<YouTubeAudioBridgeProps> = ({
           if (state === 1) {
             const cur = p.getCurrentTime?.() || 0;
             const dur = p.getDuration?.() || 0;
-            onTimeProgress(cur, dur);
+            onTimeProgressRef.current(cur, dur);
+            const rawQ = p.getPlaybackQuality?.();
+            if (rawQ) {
+              onAudioQualityChangeRef.current?.(mapYouTubeQualityToAudioEstimate(rawQ));
+            }
           }
         } catch {
           // ignore
@@ -278,7 +341,8 @@ export const YouTubeAudioBridge: React.FC<YouTubeAudioBridgeProps> = ({
         playerRef.current &&
         isReadyRef.current
       ) {
-        setTimeout(() => {
+        if (visibilityTimer) clearTimeout(visibilityTimer);
+        visibilityTimer = setTimeout(() => {
           try {
             if (isPlayingRef.current && playerRef.current) {
               syncPlayerToDesiredVideo(playerRef.current, false);
@@ -293,6 +357,7 @@ export const YouTubeAudioBridge: React.FC<YouTubeAudioBridgeProps> = ({
 
     return () => {
       if (pollTimer) clearInterval(pollTimer);
+      if (visibilityTimer) clearTimeout(visibilityTimer);
       document.removeEventListener('visibilitychange', handleVisibility);
       try {
         playerRef.current?.destroy();

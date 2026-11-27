@@ -5,44 +5,12 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import zlib from 'zlib';
 import { Ytdl, chooseFormat, Quality } from '@distube/ytdl-core';
+import { extractYouTubeId } from './src/shared/youtubeId';
 
 const ytdlClient = new Ytdl();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-// Extract 11-character YouTube video ID from any YouTube URL format
-function extractYouTubeId(input: string): string | null {
-  const trimmed = input.trim();
-  if (/^[a-zA-Z0-9_-]{11}$/.test(trimmed)) {
-    return trimmed;
-  }
-  try {
-    const url = new URL(trimmed.startsWith('http') ? trimmed : `https://${trimmed}`);
-    const host = url.hostname.replace(/^www\./, '').replace(/^m\./, '');
-    if (host === 'youtu.be') {
-      const id = url.pathname.split('/').filter(Boolean)[0];
-      return id && /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
-    }
-    if (host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
-      const vParam = url.searchParams.get('v');
-      if (vParam && /^[a-zA-Z0-9_-]{11}$/.test(vParam)) {
-        return vParam;
-      }
-      const segments = url.pathname.split('/').filter(Boolean);
-      if (segments.length >= 2 && ['shorts', 'live', 'embed', 'v'].includes(segments[0])) {
-        const candidate = segments[1];
-        if (/^[a-zA-Z0-9_-]{11}$/.test(candidate)) {
-          return candidate;
-        }
-      }
-    }
-  } catch {
-    // Fallback regex search
-  }
-  const match = trimmed.match(/(?:v=|\/v\/|youtu\.be\/|\/embed\/|\/shorts\/|\/live\/)([a-zA-Z0-9_-]{11})/);
-  return match ? match[1] : null;
-}
 
 // Generate a valid minimal PNG icon buffer with dark background & amber play motif for PWA compliance
 function createPwaPngIcon(size: number, isMaskable: boolean): Buffer {
@@ -286,8 +254,53 @@ function streamSynthesizedAudio(req: Request, res: Response, _videoId: string) {
   res.end(slice);
 }
 
-// Cache direct audio URLs per videoId for 10 minutes so Range requests are instant
+// Promise timeout wrapper that always clears its timer in finally to prevent dangling timers
+async function withTimeout<T>(promise: Promise<T>, ms: number, errorMessage = 'timeout'): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(errorMessage)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// Validate that an upstream media stream URL belongs strictly to YouTube's official googlevideo CDN over HTTPS
+function isAllowedYouTubeMediaUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    return (
+      parsed.protocol === 'https:' &&
+      (parsed.hostname === 'googlevideo.com' || parsed.hostname.endsWith('.googlevideo.com'))
+    );
+  } catch {
+    return false;
+  }
+}
+
+// Bounded TTL cache for direct audio URLs per videoId (10-minute TTL, max 200 entries)
+const MAX_DIRECT_CACHE_ENTRIES = 200;
 const directUrlCache = new Map<string, { url: string | null; mimeType: string; expiresAt: number }>();
+
+function setDirectUrlCache(videoId: string, entry: { url: string | null; mimeType: string; expiresAt: number }) {
+  const now = Date.now();
+  if (directUrlCache.size >= MAX_DIRECT_CACHE_ENTRIES) {
+    for (const [k, v] of directUrlCache.entries()) {
+      if (v.expiresAt <= now) {
+        directUrlCache.delete(k);
+      }
+    }
+    if (directUrlCache.size >= MAX_DIRECT_CACHE_ENTRIES) {
+      const oldestKey = directUrlCache.keys().next().value;
+      if (oldestKey) directUrlCache.delete(oldestKey);
+    }
+  }
+  directUrlCache.set(videoId, entry);
+}
 
 async function resolveDirectAudioUrlFast(videoId: string): Promise<{ url: string; mimeType: string } | null> {
   const cached = directUrlCache.get(videoId);
@@ -296,23 +309,25 @@ async function resolveDirectAudioUrlFast(videoId: string): Promise<{ url: string
   }
 
   try {
-    const info = await Promise.race([
+    const info = await withTimeout(
       ytdlClient.getInfo(`https://www.youtube.com/watch?v=${videoId}`),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('fast timeout')), 1100)),
-    ]);
+      1100,
+      'fast timeout'
+    );
     const format = chooseFormat(info.formats, {
       quality: Quality.HighestAudio,
       filter: { hasAudio: true, hasVideo: false },
     });
-    if (format?.url) {
+    if (format?.url && isAllowedYouTubeMediaUrl(format.url)) {
       // Quick HEAD/Range probe to verify YouTube CDN doesn't return 403 for this IP
-      const probe = await Promise.race([
+      const probe = await withTimeout(
         fetch(format.url, { headers: { Range: 'bytes=0-1023' } }),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 800)),
-      ]);
+        800,
+        'probe timeout'
+      );
       if (probe.ok || probe.status === 206) {
         const mimeType = format.mimeType?.split(';')[0] || 'audio/mp4';
-        directUrlCache.set(videoId, { url: format.url, mimeType, expiresAt: Date.now() + 600_000 });
+        setDirectUrlCache(videoId, { url: format.url, mimeType, expiresAt: Date.now() + 600_000 });
         return { url: format.url, mimeType };
       }
     }
@@ -320,7 +335,7 @@ async function resolveDirectAudioUrlFast(videoId: string): Promise<{ url: string
     // Direct URL unavailable from datacenter IP
   }
 
-  directUrlCache.set(videoId, { url: null, mimeType: 'audio/wav', expiresAt: Date.now() + 600_000 });
+  setDirectUrlCache(videoId, { url: null, mimeType: 'audio/wav', expiresAt: Date.now() + 600_000 });
   return null;
 }
 
@@ -373,10 +388,11 @@ async function startServer() {
 
     const ytdlPromise = (async () => {
       try {
-        const info = await Promise.race([
+        const info = await withTimeout(
           ytdlClient.getInfo(`https://www.youtube.com/watch?v=${videoId}`),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 1300)),
-        ]);
+          1300,
+          'timeout'
+        );
         if (info?.videoDetails) {
           title = info.videoDetails.title || title;
           author = info.videoDetails.author?.name || author;
@@ -419,7 +435,7 @@ async function startServer() {
     }
 
     const direct = await resolveDirectAudioUrlFast(videoId);
-    if (direct) {
+    if (direct && isAllowedYouTubeMediaUrl(direct.url)) {
       try {
         const headers: Record<string, string> = {
           'User-Agent':
@@ -441,20 +457,37 @@ async function startServer() {
 
           if (upstream.body) {
             const reader = upstream.body.getReader();
-            req.on('close', () => {
+            let clientClosed = false;
+            const onClientClose = () => {
+              clientClosed = true;
               reader.cancel().catch(() => {});
-            });
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              res.write(Buffer.from(value));
+            };
+            req.on('close', onClientClose);
+
+            try {
+              while (!clientClosed && !res.writableEnded && !res.destroyed) {
+                const { done, value } = await reader.read();
+                if (done || clientClosed || res.writableEnded || res.destroyed) break;
+                const canContinue = res.write(Buffer.from(value));
+                if (!canContinue) {
+                  await new Promise<void>((resolve) => res.once('drain', resolve));
+                }
+              }
+              if (!res.writableEnded && !res.destroyed) {
+                res.end();
+              }
+            } finally {
+              req.off('close', onClientClose);
             }
-            res.end();
             return;
           }
         }
       } catch {
-        // Fall through to instant WAV stream
+        if (res.headersSent) {
+          if (!res.writableEnded && !res.destroyed) res.end();
+          return;
+        }
+        // Fall through to instant WAV stream if headers were not sent yet
       }
     }
 
@@ -561,10 +594,11 @@ async function startServer() {
     // Attempt B: InnerTube search via @distube/ytdl-core
     if (episodes.length === 0) {
       try {
-        const results = await Promise.race([
+        const results = await withTimeout(
           ytdlClient.search(displayTitle, { limit: 6 }),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('search timeout')), 4200)),
-        ]);
+          4200,
+          'search timeout'
+        );
         if (Array.isArray(results) && results.length > 0) {
           for (let i = 0; i < results.length && episodes.length < 5; i++) {
             const item = results[i] as {

@@ -66,14 +66,14 @@ export const TrackArtwork: React.FC<TrackArtworkProps> = ({
   if (!activeSrc || hasError) {
     return (
       <div
-        className={`${className} bg-gradient-to-br from-[#1A1F2E] via-[#12151E] to-[#090A0F] border border-white/10 flex flex-col items-center justify-center text-amber-400/80 select-none overflow-hidden shrink-0`}
+        className={`${className} bg-gradient-to-br from-slate-200 via-slate-100 to-slate-200 dark:from-[#1A1F2E] dark:via-[#12151E] dark:to-[#090A0F] border border-slate-300/70 dark:border-white/10 flex flex-col items-center justify-center text-amber-600/80 dark:text-amber-400/80 select-none overflow-hidden shrink-0`}
         role="img"
         aria-label={alt}
       >
         <Disc3
           className={`${variant === 'hero' ? 'w-16 h-16' : 'w-1/2 h-1/2'} ${
             isPlaying ? 'animate-spin' : ''
-          } text-amber-400/70`}
+          } text-amber-500/80 dark:text-amber-400/70`}
           style={{ animationDuration: '8s' }}
         />
       </div>
@@ -82,7 +82,7 @@ export const TrackArtwork: React.FC<TrackArtworkProps> = ({
 
   return (
     <div
-      className={`${className} relative overflow-hidden bg-[#0D1017] border border-white/10 shrink-0`}
+      className={`${className} relative overflow-hidden bg-slate-200 dark:bg-[#0D1017] border border-slate-300/70 dark:border-white/10 shrink-0`}
     >
       {variant === 'hero' && (
         <img

@@ -1,37 +1,7 @@
 import { SubscribedChannel, Track } from '../types';
+import { extractYouTubeId } from '../shared/youtubeId';
 
-export function extractYouTubeIdClient(input: string): string | null {
-  const trimmed = input.trim();
-  if (!trimmed) return null;
-  if (/^[a-zA-Z0-9_-]{11}$/.test(trimmed)) {
-    return trimmed;
-  }
-  try {
-    const url = new URL(trimmed.startsWith('http') ? trimmed : `https://${trimmed}`);
-    const host = url.hostname.replace(/^www\./, '').replace(/^m\./, '');
-    if (host === 'youtu.be') {
-      const id = url.pathname.split('/').filter(Boolean)[0];
-      return id && /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
-    }
-    if (host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
-      const vParam = url.searchParams.get('v');
-      if (vParam && /^[a-zA-Z0-9_-]{11}$/.test(vParam)) {
-        return vParam;
-      }
-      const segments = url.pathname.split('/').filter(Boolean);
-      if (segments.length >= 2 && ['shorts', 'live', 'embed', 'v'].includes(segments[0])) {
-        const candidate = segments[1];
-        if (/^[a-zA-Z0-9_-]{11}$/.test(candidate)) {
-          return candidate;
-        }
-      }
-    }
-  } catch {
-    // fallback regex
-  }
-  const match = trimmed.match(/(?:v=|\/v\/|youtu\.be\/|\/embed\/|\/shorts\/|\/live\/)([a-zA-Z0-9_-]{11})/);
-  return match ? match[1] : null;
-}
+export { extractYouTubeId, extractYouTubeId as extractYouTubeIdClient };
 
 export function formatDuration(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return '00:00';

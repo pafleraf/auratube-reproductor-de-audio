@@ -33,8 +33,11 @@ import {
   UserCheck,
   CheckCheck,
   Cloud,
+  Sun,
   SunDim,
+  Monitor,
   Clock,
+  X,
 } from 'lucide-react';
 import {
   ActiveTab,
@@ -57,15 +60,28 @@ import {
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { TrackArtwork } from './components/TrackArtwork';
 import { AddToPlaylistModal } from './components/AddToPlaylistModal';
-import { YouTubeAudioBridge } from './components/YouTubeAudioBridge';
+import {
+  YouTubeAudioBridge,
+  AudioQualityEstimate,
+  mapYouTubeQualityToAudioEstimate,
+} from './components/YouTubeAudioBridge';
 import { GoogleDriveSyncBar } from './components/GoogleDriveSyncBar';
 import { AuraTubeDriveBackup } from './services/googleDriveSync';
+import { usePersistedState } from './hooks/usePersistedState';
+import { useSleepTimer } from './hooks/useSleepTimer';
+import { useMediaSession } from './hooks/useMediaSession';
+import {
+  ListeningHistoryChart,
+  getLocalDateKey,
+  buildInitialDailyListeningSeconds,
+} from './components/ListeningHistoryChart';
 
 const STORAGE_KEYS = {
   QUEUE: 'auratube_queue_v2',
   CURRENT_INDEX: 'auratube_current_idx_v2',
   PLAYLISTS: 'auratube_playlists_v2',
   HISTORY: 'auratube_history_v2',
+  DAILY_LISTENING: 'auratube_daily_listening_v1',
   SPEED: 'auratube_speed_v1',
   POSITIONS: 'auratube_positions_v1',
   SUBSCRIPTIONS: 'auratube_subscriptions_v2',
@@ -74,10 +90,12 @@ const STORAGE_KEYS = {
   SPLIT_PCT: 'auratube_split_pct_v1',
   BTN_SCALE: 'auratube_btn_scale_v1',
   NIGHT_DIM: 'auratube_night_dim_v1',
+  THEME_MODE: 'auratube_theme_mode_v1',
 };
 
 type ButtonScale = 'sm' | 'md' | 'lg';
 type NightDimMode = 'auto' | 'forced' | 'off';
+type ThemeMode = 'light' | 'dark' | 'system';
 
 interface NightDimSettings {
   mode: NightDimMode;
@@ -146,8 +164,8 @@ export default function App() {
   const splitContainerRef = useRef<HTMLElement | null>(null);
   const isDraggingSplitRef = useRef<boolean>(false);
 
-  // Navigation & responsive layout state
-  const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
+  // Navigation & responsive layout state with directional transition tracking
+  const [activeTab, setActiveTabState] = useState<ActiveTab>(() => {
     if (
       typeof window !== 'undefined' &&
       window.innerWidth > window.innerHeight &&
@@ -157,6 +175,29 @@ export default function App() {
     }
     return 'player';
   });
+  const [tabTransitionDir, setTabTransitionDir] = useState<'forward' | 'backward'>('forward');
+  const prevTabRef = useRef<ActiveTab>(activeTab);
+
+  const setActiveTab = useCallback((next: ActiveTab | ((prev: ActiveTab) => ActiveTab)) => {
+    setActiveTabState((prev) => {
+      const resolved = typeof next === 'function' ? next(prev) : next;
+      if (resolved !== prev) {
+        const order: Record<ActiveTab, number> = {
+          player: 0,
+          queue: 1,
+          channels: 2,
+          playlists: 3,
+          history: 4,
+        };
+        setTabTransitionDir(order[resolved] >= order[prev] ? 'forward' : 'backward');
+        prevTabRef.current = resolved;
+      }
+      return resolved;
+    });
+  }, []);
+
+  const tabTransitionClass =
+    tabTransitionDir === 'forward' ? 'tab-transition-forward' : 'tab-transition-backward';
 
   useEffect(() => {
     const updateViewportMode = () => {
@@ -287,34 +328,26 @@ export default function App() {
     }
   }, []);
 
-  // Subscribed Channels state
-  const [subscriptions, setSubscriptions] = useState<SubscribedChannel[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.SUBSCRIPTIONS);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch {
-      // fallback
+  // Subscribed Channels state (debounced localStorage persistence)
+  const [subscriptions, setSubscriptions] = usePersistedState<SubscribedChannel[]>(
+    STORAGE_KEYS.SUBSCRIPTIONS,
+    INITIAL_SUBSCRIBED_CHANNELS,
+    {
+      deserialize: (raw) => {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) && parsed.length > 0 ? parsed : INITIAL_SUBSCRIBED_CHANNELS;
+      },
     }
-    return INITIAL_SUBSCRIBED_CHANNELS;
-  });
+  );
 
   // Seen Episodes map (videoId -> true) for episodes already played or explicitly marked as seen
-  const [seenEpisodes, setSeenEpisodes] = useState<Record<string, boolean>>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.SEEN_EPISODES);
-      if (saved) return JSON.parse(saved);
-    } catch {
-      // fallback
-    }
-    // Older baseline episodes marked as already seen prior to last connection
-    return {
+  const [seenEpisodes, setSeenEpisodes] = usePersistedState<Record<string, boolean>>(
+    STORAGE_KEYS.SEEN_EPISODES,
+    {
       '5qap5aO4i9A': true,
       DWcJFNfaw9c: true,
-    };
-  });
+    }
+  );
 
   // Channel tab UI states & custom episode order/selection
   const [channelQuery, setChannelQuery] = useState('');
@@ -323,98 +356,140 @@ export default function App() {
   const [selectedChannelFilter, setSelectedChannelFilter] = useState<string>('all');
   const [channelEpisodeOrder, setChannelEpisodeOrder] = useState<string[]>([]);
   const [selectedVideoKey, setSelectedVideoKey] = useState<string | null>(null);
+  const [newlyQueuedVideoId, setNewlyQueuedVideoId] = useState<string | null>(null);
+  const newlyQueuedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Queue & current track state
-  const [queue, setQueue] = useState<Track[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.QUEUE);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch {
-      // fallback
+  const triggerQueueItemSlideIn = useCallback((videoId: string, scrollToBottom = false) => {
+    if (newlyQueuedTimerRef.current) {
+      clearTimeout(newlyQueuedTimerRef.current);
     }
-    return INITIAL_SUGGESTED_TRACKS;
-  });
+    setNewlyQueuedVideoId(videoId);
+    if (scrollToBottom) {
+      requestAnimationFrame(() => {
+        const listEl = queueListRef.current;
+        if (listEl) {
+          listEl.scrollTo({ top: listEl.scrollHeight, behavior: 'smooth' });
+        }
+      });
+    }
+    newlyQueuedTimerRef.current = setTimeout(() => {
+      setNewlyQueuedVideoId((prev) => (prev === videoId ? null : prev));
+    }, 1400);
+  }, []);
 
-  const [currentIndex, setCurrentIndex] = useState<number>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.CURRENT_INDEX);
-      const parsed = saved ? parseInt(saved, 10) : 0;
-      return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
-    } catch {
-      return 0;
-    }
-  });
-
-  // Playlists state
-  const [playlists, setPlaylists] = useState<Playlist[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.PLAYLISTS);
-      if (saved) return JSON.parse(saved);
-    } catch {
-      // default
-    }
-    return [
-      {
-        id: 'pl-default-focus',
-        name: 'Sesiones Deep Focus',
-        description: 'Audio continuo para concentración con pantalla apagada',
-        createdAt: Date.now() - 86400 * 1000,
-        tracks: INITIAL_SUGGESTED_TRACKS.slice(0, 2),
+  // Queue & current track state (debounced localStorage persistence)
+  const [queue, setQueue] = usePersistedState<Track[]>(
+    STORAGE_KEYS.QUEUE,
+    INITIAL_SUGGESTED_TRACKS,
+    {
+      deserialize: (raw) => {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) && parsed.length > 0 ? parsed : INITIAL_SUGGESTED_TRACKS;
       },
-    ];
-  });
-
-  // Listening History state
-  const [history, setHistory] = useState<HistoryItem[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.HISTORY);
-      if (saved) return JSON.parse(saved);
-    } catch {
-      // default
     }
-    return [
+  );
+
+  const [currentIndex, setCurrentIndex] = usePersistedState<number>(
+    STORAGE_KEYS.CURRENT_INDEX,
+    0,
+    {
+      debounceMs: 120,
+      serialize: (val) => String(val),
+      deserialize: (raw) => {
+        const parsed = parseInt(raw, 10);
+        return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+      },
+    }
+  );
+
+  // Playlists state (debounced localStorage persistence)
+  const [playlists, setPlaylists] = usePersistedState<Playlist[]>(STORAGE_KEYS.PLAYLISTS, () => [
+    {
+      id: 'pl-default-focus',
+      name: 'Sesiones Deep Focus',
+      description: 'Audio continuo para concentración con pantalla apagada',
+      createdAt: Date.now() - 86400 * 1000,
+      tracks: INITIAL_SUGGESTED_TRACKS.slice(0, 2),
+    },
+  ]);
+
+  // Listening History state (debounced localStorage persistence, capped at 60 items)
+  const [history, setHistory] = usePersistedState<HistoryItem[]>(
+    STORAGE_KEYS.HISTORY,
+    () => [
       {
         id: 'hist-initial-1',
         track: INITIAL_SUGGESTED_TRACKS[0],
         playedAt: Date.now() - 1800 * 1000,
         lastPosition: 45,
       },
-    ];
-  });
+    ],
+    {
+      serialize: (items) => JSON.stringify(items.slice(0, 60)),
+    }
+  );
 
   // Saved playback positions map (videoId -> seconds)
-  const [savedPositions, setSavedPositions] = useState<Record<string, number>>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.POSITIONS);
-      return saved ? JSON.parse(saved) : {};
-    } catch {
-      return {};
-    }
+  const [savedPositions, setSavedPositions] = usePersistedState<Record<string, number>>(
+    STORAGE_KEYS.POSITIONS,
+    {},
+    { debounceMs: 400 }
+  );
+
+  // Daily listening seconds map (YYYY-MM-DD -> seconds) for the 7-day Recharts bar chart
+  const [dailyListeningSeconds, setDailyListeningSeconds] = usePersistedState<
+    Record<string, number>
+  >(STORAGE_KEYS.DAILY_LISTENING, buildInitialDailyListeningSeconds, {
+    debounceMs: 1000,
   });
 
   // Audio Engine State
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const pendingStartPosRef = useRef<number>(0);
+  const lastSavedSecRef = useRef<number>(-1);
   const [isPlaying, setIsPlaying] = useState(false);
+
+  // Accumulate daily listening time in real time while playback is active
+  useEffect(() => {
+    if (!isPlaying) return;
+    const interval = setInterval(() => {
+      const todayKey = getLocalDateKey();
+      setDailyListeningSeconds((prev) => ({
+        ...prev,
+        [todayKey]: (prev[todayKey] ?? 0) + 1,
+      }));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isPlaying, setDailyListeningSeconds]);
   const [isBuffering, setIsBuffering] = useState(false);
   const [isBridgeActive, setIsBridgeActive] = useState(false);
+  const [audioQuality, setAudioQuality] = useState<AudioQualityEstimate>(() => {
+    const navConn = (
+      navigator as Navigator & {
+        connection?: { saveData?: boolean; effectiveType?: string; downlink?: number };
+      }
+    ).connection;
+    if (navConn?.saveData || navConn?.effectiveType === '2g') {
+      return mapYouTubeQualityToAudioEstimate('small');
+    }
+    if (navConn?.effectiveType === '3g' || (navConn?.downlink && navConn.downlink < 1.5)) {
+      return mapYouTubeQualityToAudioEstimate('medium');
+    }
+    return mapYouTubeQualityToAudioEstimate('hd1080');
+  });
   const [seekTrigger, setSeekTrigger] = useState<{ time: number; seq: number } | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [repeatMode, setRepeatMode] = useState<RepeatMode>('off');
-  const [playbackRate, setPlaybackRate] = useState<number>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.SPEED);
-      const num = saved ? parseFloat(saved) : 1;
+  const [playbackRate, setPlaybackRate] = usePersistedState<number>(STORAGE_KEYS.SPEED, 1, {
+    debounceMs: 120,
+    serialize: (val) => String(val),
+    deserialize: (raw) => {
+      const num = parseFloat(raw);
       return SPEED_OPTIONS.includes(num) ? num : 1;
-    } catch {
-      return 1;
-    }
+    },
   });
 
   // Unregister any stale dev Service Worker that could block /api/youtube/stream Range requests
@@ -454,12 +529,39 @@ export default function App() {
     }
   }, [isBridgeActive, isMuted, volume]);
 
-  // Sleep Timer State
-  const [sleepRemainingSec, setSleepRemainingSec] = useState<number | null>(null);
-  const [sleepOnTrackEnd, setSleepOnTrackEnd] = useState(false);
-  const [showSleepMenu, setShowSleepMenu] = useState(false);
+  // Menu toggles
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
   const [showNightDimMenu, setShowNightDimMenu] = useState(false);
+
+  // Selectable Theme Mode ('light' | 'dark' | 'system')
+  const [themeMode, setThemeMode] = usePersistedState<ThemeMode>(
+    STORAGE_KEYS.THEME_MODE,
+    'system',
+    {
+      debounceMs: 50,
+      serialize: (val) => val,
+      deserialize: (raw) =>
+        raw === 'light' || raw === 'dark' || raw === 'system' ? raw : 'system',
+    }
+  );
+
+  const [systemPrefersDark, setSystemPrefersDark] = useState<boolean>(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return true;
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  });
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mql = window.matchMedia('(prefers-color-scheme: dark)');
+    const handleChange = (e: MediaQueryListEvent) => {
+      setSystemPrefersDark(e.matches);
+    };
+    setSystemPrefersDark(mql.matches);
+    mql.addEventListener('change', handleChange);
+    return () => mql.removeEventListener('change', handleChange);
+  }, []);
+
+  const isDarkTheme = themeMode === 'dark' || (themeMode === 'system' && systemPrefersDark);
 
   // Automatic System-Time Nocturnal Dimmer & Forced OLED Dark Theme State
   const [nightDim, setNightDim] = useState<NightDimSettings>(() => {
@@ -542,10 +644,25 @@ export default function App() {
   );
 
   const isNightDimActive =
-    nightDim.mode === 'forced' || (nightDim.mode === 'auto' && isScheduledNightNow);
-  const isPureOledActive = isNightDimActive && nightDim.pureOledBlack;
+    isDarkTheme &&
+    (nightDim.mode === 'forced' || (nightDim.mode === 'auto' && isScheduledNightNow));
+  const isPureOledActive = isDarkTheme && isNightDimActive && nightDim.pureOledBlack;
 
-  // Playlists & History UI state
+  // Synchronize HTML .dark class and <meta name="theme-color"> for PWA status bar
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    document.documentElement.classList.toggle('dark', isDarkTheme);
+    const metaTheme = document.querySelector('meta[name="theme-color"]');
+    if (metaTheme) {
+      metaTheme.setAttribute(
+        'content',
+        isPureOledActive ? '#000000' : isDarkTheme ? '#090A0F' : '#F1F5F9'
+      );
+    }
+  }, [isDarkTheme, isPureOledActive]);
+
+  // Queue, Playlists & History UI state
+  const [queueSearch, setQueueSearch] = useState('');
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
   const [newPlaylistTitle, setNewPlaylistTitle] = useState('');
   const [historySearch, setHistorySearch] = useState('');
@@ -564,70 +681,22 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [feedbackMsg]);
 
-  // Persist states in localStorage
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.QUEUE, JSON.stringify(queue));
-    } catch {
-      // ignore
-    }
-  }, [queue]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.CURRENT_INDEX, String(currentIndex));
-    } catch {
-      // ignore
-    }
-  }, [currentIndex]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.PLAYLISTS, JSON.stringify(playlists));
-    } catch {
-      // ignore
-    }
-  }, [playlists]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(history.slice(0, 60)));
-    } catch {
-      // ignore
-    }
-  }, [history]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.SPEED, String(playbackRate));
-    } catch {
-      // ignore
-    }
-  }, [playbackRate]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.POSITIONS, JSON.stringify(savedPositions));
-    } catch {
-      // ignore
-    }
-  }, [savedPositions]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.SUBSCRIPTIONS, JSON.stringify(subscriptions));
-    } catch {
-      // ignore
-    }
-  }, [subscriptions]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.SEEN_EPISODES, JSON.stringify(seenEpisodes));
-    } catch {
-      // ignore
-    }
-  }, [seenEpisodes]);
+  // Modular Sleep Timer hook (countdown + 5-second volume fade-out)
+  const {
+    sleepRemainingSec,
+    sleepOnTrackEnd,
+    setSleepOnTrackEnd,
+    showSleepMenu,
+    setShowSleepMenu,
+    handleSelectSleepOption,
+  } = useSleepTimer({
+    isPlaying,
+    volume,
+    isMuted,
+    audioRef,
+    setIsPlaying,
+    notify,
+  });
 
   // Helper to check if an episode is new since last connection (and not yet played/seen)
   const isEpisodeNew = useCallback(
@@ -770,11 +839,12 @@ export default function App() {
       } else {
         setQueue((prev) => [track, ...prev.filter((t) => t.videoId !== track.videoId)]);
         setCurrentIndex(0);
+        triggerQueueItemSlideIn(track.videoId, false);
       }
       startPlaybackForTrack(track, true, resumeSec);
       notify(`Reproduciendo: ${track.title}`);
     },
-    [queue, startPlaybackForTrack, notify]
+    [queue, startPlaybackForTrack, notify, triggerQueueItemSlideIn]
   );
 
   const handleNextTrack = useCallback(() => {
@@ -857,53 +927,16 @@ export default function App() {
   }, []);
 
   // Configure Media Session API for persistent Notification Bar & Lock Screen Controls
-  useEffect(() => {
-    if (!('mediaSession' in navigator) || !currentTrack) return;
-
-    try {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: currentTrack.title,
-        artist: currentTrack.author,
-        album: 'AuraTube Background Audio',
-        artwork: [
-          { src: currentTrack.thumbnailUrl, sizes: '96x96', type: 'image/jpeg' },
-          { src: currentTrack.thumbnailUrl, sizes: '128x128', type: 'image/jpeg' },
-          { src: currentTrack.thumbnailUrl, sizes: '192x192', type: 'image/jpeg' },
-          { src: currentTrack.thumbnailUrl, sizes: '256x256', type: 'image/jpeg' },
-          { src: currentTrack.thumbnailUrl, sizes: '384x384', type: 'image/jpeg' },
-          { src: currentTrack.thumbnailUrl, sizes: '512x512', type: 'image/jpeg' },
-        ],
-      });
-
-      navigator.mediaSession.setActionHandler('play', () => {
-        audioRef.current?.play().then(() => setIsPlaying(true)).catch(() => {});
-      });
-      navigator.mediaSession.setActionHandler('pause', () => {
-        audioRef.current?.pause();
-        setIsPlaying(false);
-      });
-      navigator.mediaSession.setActionHandler('previoustrack', handlePrevTrack);
-      navigator.mediaSession.setActionHandler('nexttrack', handleNextTrack);
-      navigator.mediaSession.setActionHandler('seekbackward', (details) => {
-        seekBySeconds(-(details.seekOffset || 10));
-      });
-      navigator.mediaSession.setActionHandler('seekforward', (details) => {
-        seekBySeconds(details.seekOffset || 10);
-      });
-      navigator.mediaSession.setActionHandler('seekto', (details) => {
-        if (typeof details.seekTime === 'number') {
-          seekToAbsolute(details.seekTime);
-        }
-      });
-    } catch {
-      // Ignore unsupported mediaSession actions
-    }
-  }, [currentTrack, handlePrevTrack, handleNextTrack, seekBySeconds, seekToAbsolute]);
-
-  useEffect(() => {
-    if (!('mediaSession' in navigator)) return;
-    navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
-  }, [isPlaying]);
+  useMediaSession({
+    currentTrack,
+    isPlaying,
+    audioRef,
+    setIsPlaying,
+    onPrevTrack: handlePrevTrack,
+    onNextTrack: handleNextTrack,
+    onSeekBySeconds: seekBySeconds,
+    onSeekToAbsolute: seekToAbsolute,
+  });
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -911,33 +944,6 @@ export default function App() {
     audio.playbackRate = playbackRate;
     (audio as HTMLAudioElement & { preservesPitch?: boolean }).preservesPitch = true;
   }, [playbackRate]);
-
-  // Sleep Timer countdown & smooth 5-second volume fade-out
-  useEffect(() => {
-    if (sleepRemainingSec === null || sleepRemainingSec <= 0 || !isPlaying) return;
-
-    const interval = setInterval(() => {
-      setSleepRemainingSec((prev) => {
-        if (prev === null) return null;
-        if (prev <= 1) {
-          const audio = audioRef.current;
-          if (audio) {
-            audio.pause();
-            audio.volume = isMuted ? 0 : volume;
-          }
-          setIsPlaying(false);
-          notify('Temporizador finalizado: reproducción pausada');
-          return null;
-        }
-        if (prev <= 6 && audioRef.current && !isMuted) {
-          audioRef.current.volume = Math.max(0.05, (volume * (prev - 1)) / 5);
-        }
-        return prev - 1;
-      });
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [sleepRemainingSec, isPlaying, volume, isMuted, notify]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -976,6 +982,7 @@ export default function App() {
           ...prev.filter((t) => t.videoId !== resolvedTrack.videoId),
         ]);
         setCurrentIndex(0);
+        triggerQueueItemSlideIn(resolvedTrack.videoId, false);
         setActiveTab('player');
         startPlaybackForTrack(resolvedTrack, true, 0);
         notify(`Reproduciendo audio: ${resolvedTrack.title}`);
@@ -985,6 +992,7 @@ export default function App() {
           notify('La pista ya está en la cola de reproducción');
         } else {
           setQueue((prev) => [...prev, resolvedTrack]);
+          triggerQueueItemSlideIn(resolvedTrack.videoId, true);
           notify(`Añadido a la cola: ${resolvedTrack.title}`);
         }
       }
@@ -1079,30 +1087,30 @@ export default function App() {
     if (subscriptions.length === 0) return;
     setIsRefreshingFeed(true);
     try {
-      const refreshed: SubscribedChannel[] = [];
-      for (const ch of subscriptions) {
-        try {
-          const latest = await resolveYouTubeChannelFeed(ch.handle || ch.name);
-          // Merge episodes preserving existing and detecting any new items
-          const existingIds = new Set(ch.episodes.map((e) => e.videoId));
-          const mergedEpisodes = [...ch.episodes];
-          for (const ep of latest.episodes) {
-            if (!existingIds.has(ep.videoId)) {
-              mergedEpisodes.unshift({
-                ...ep,
-                publishedAt: Date.now(),
-              });
+      const refreshed = await Promise.all(
+        subscriptions.map(async (ch): Promise<SubscribedChannel> => {
+          try {
+            const latest = await resolveYouTubeChannelFeed(ch.handle || ch.name);
+            const existingIds = new Set(ch.episodes.map((e) => e.videoId));
+            const mergedEpisodes = [...ch.episodes];
+            for (const ep of latest.episodes) {
+              if (!existingIds.has(ep.videoId)) {
+                mergedEpisodes.unshift({
+                  ...ep,
+                  publishedAt: Date.now(),
+                });
+              }
             }
+            return {
+              ...ch,
+              lastCheckedAt: Date.now(),
+              episodes: mergedEpisodes,
+            };
+          } catch {
+            return ch;
           }
-          refreshed.push({
-            ...ch,
-            lastCheckedAt: Date.now(),
-            episodes: mergedEpisodes,
-          });
-        } catch {
-          refreshed.push(ch);
-        }
-      }
+        })
+      );
       setSubscriptions(refreshed);
       notify('Feed de canales actualizado con éxito');
     } finally {
@@ -1308,26 +1316,14 @@ export default function App() {
       notify('Esta lista aún no tiene pistas', 'error');
       return;
     }
+    const safeIndex = Math.max(0, Math.min(startIndex, pl.tracks.length - 1));
+    const target = pl.tracks[safeIndex];
     setQueue([...pl.tracks]);
-    setCurrentIndex(startIndex);
+    setCurrentIndex(safeIndex);
     setActiveTab('player');
-    setTimeout(() => {
-      const audio = audioRef.current;
-      const target = pl.tracks[startIndex];
-      if (audio && target) {
-        audio.src =
-          target.audioStreamUrl ||
-          `/api/youtube/stream?id=${target.videoId}&duration=${target.durationSeconds || 240}`;
-        audio.playbackRate = playbackRate;
-        audio
-          .play()
-          .then(() => {
-            setIsPlaying(true);
-            recordHistory(target, 0);
-          })
-          .catch(() => {});
-      }
-    }, 30);
+    if (target) {
+      startPlaybackForTrack(target, true, 0);
+    }
     notify(`Reproduciendo lista: ${pl.name}`);
   };
 
@@ -1512,29 +1508,30 @@ export default function App() {
     [notify]
   );
 
-  // Sleep Timer Handler
-  const handleSelectSleepOption = (minutes: number | 'track' | 0) => {
-    setShowSleepMenu(false);
-    if (minutes === 0) {
-      setSleepRemainingSec(null);
-      setSleepOnTrackEnd(false);
-      if (audioRef.current && !isMuted) {
-        audioRef.current.volume = volume;
-      }
-      notify('Temporizador desactivado');
-    } else if (minutes === 'track') {
-      setSleepRemainingSec(null);
-      setSleepOnTrackEnd(true);
-      notify('El audio se detendrá al finalizar la pista actual');
-    } else {
-      setSleepOnTrackEnd(false);
-      setSleepRemainingSec(minutes * 60);
-      notify(`Apagado automático en ${minutes} minutos`);
-    }
-  };
-
   const effectiveDuration = duration > 0 ? duration : currentTrack?.durationSeconds || 240;
   const progressPercent = Math.min(100, Math.max(0, (currentTime / effectiveDuration) * 100));
+
+  const filteredQueue = useMemo(() => {
+    const query = queueSearch
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
+    return queue
+      .map((track, realIdx) => ({ track, realIdx }))
+      .filter(({ track }) => {
+        if (!query) return true;
+        const normTitle = track.title
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '');
+        const normAuthor = track.author
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '');
+        return normTitle.includes(query) || normAuthor.includes(query);
+      });
+  }, [queue, queueSearch]);
 
   const filteredHistory = history.filter(
     (item) =>
@@ -1548,8 +1545,10 @@ export default function App() {
   return (
     <div
       className={`h-[100dvh] w-full ${
-        isPureOledActive ? 'bg-black' : 'bg-[#090A0F]'
-      } text-[#F1F5F9] flex flex-col overflow-hidden select-none transition-colors duration-700`}
+        isPureOledActive
+          ? 'bg-black text-[#F1F5F9]'
+          : 'bg-[#F1F5F9] dark:bg-[#090A0F] text-slate-900 dark:text-[#F1F5F9]'
+      } flex flex-col overflow-hidden select-none transition-colors duration-300`}
     >
       {/* Automatic System-Time Brightness Attenuation Veil (Pointer-Events-None Overlay) */}
       <div
@@ -1576,6 +1575,11 @@ export default function App() {
           }
           seekTrigger={seekTrigger}
           onBridgeActiveChange={(active) => setIsBridgeActive(active)}
+          onAudioQualityChange={(q) => {
+            setAudioQuality((prev) =>
+              prev.bitrateKbps === q.bitrateKbps && prev.codec === q.codec ? prev : q
+            );
+          }}
           onTimeProgress={(cur, dur) => {
             setIsBuffering(false);
             setCurrentTime(cur);
@@ -1634,11 +1638,22 @@ export default function App() {
             setCurrentTime(now);
           }
 
-          if (currentTrack && Math.floor(now) % 4 === 0 && now > 2) {
-            setSavedPositions((prev) => ({
-              ...prev,
-              [currentTrack.videoId]: Math.floor(now),
-            }));
+          const flooredSec = Math.floor(now);
+          if (
+            currentTrack &&
+            flooredSec > 2 &&
+            flooredSec % 4 === 0 &&
+            lastSavedSecRef.current !== flooredSec
+          ) {
+            lastSavedSecRef.current = flooredSec;
+            setSavedPositions((prev) =>
+              prev[currentTrack.videoId] === flooredSec
+                ? prev
+                : {
+                    ...prev,
+                    [currentTrack.videoId]: flooredSec,
+                  }
+            );
           }
 
           if ('mediaSession' in navigator && 'setPositionState' in navigator.mediaSession) {
@@ -1680,11 +1695,11 @@ export default function App() {
         }}
       />
 
-      {/* Top Header Bar with Integrated Circular (+) Button in Top-Right Corner */}
+      {/* Top Header Bar with Theme Selector (Claro / Oscuro / Sistema) & Integrated Circular (+) Button */}
       <header
         className={`${
-          isMobileLandscape ? 'h-11 px-2.5 gap-2' : 'h-14 px-3 sm:px-6 gap-3 sm:gap-6'
-        } border-b border-white/[0.07] bg-[#090A0F]/95 backdrop-blur-md flex items-center justify-between shrink-0 z-30 relative`}
+          isMobileLandscape ? 'h-11 px-2.5 gap-2' : 'h-14 px-3 sm:px-6 gap-2 sm:gap-4'
+        } border-b border-slate-200 dark:border-white/[0.07] bg-white/95 dark:bg-[#090A0F]/95 backdrop-blur-md flex items-center justify-between shrink-0 z-30 relative transition-colors duration-300`}
       >
         {/* Zone 1: Brand Wordmark */}
         <a
@@ -1695,7 +1710,7 @@ export default function App() {
           }}
           className={`${
             isMobileLandscape ? 'text-sm' : 'text-base sm:text-lg'
-          } font-bold font-display tracking-tight text-white whitespace-nowrap shrink-0 flex items-center gap-1.5`}
+          } font-bold font-display tracking-tight text-slate-900 dark:text-white whitespace-nowrap shrink-0 flex items-center gap-1.5`}
         >
           <Disc3
             className={`${isMobileLandscape ? 'w-4 h-4' : 'w-5 h-5'} text-amber-500 ${
@@ -1706,11 +1721,57 @@ export default function App() {
           <span>AuraTube</span>
         </a>
 
-        {/* Zone 2: Top-Right Utilities + Circular (+) Button to Paste YouTube Link */}
-        <div className="flex items-center gap-2 shrink-0">
+        {/* Zone 2: Top-Right Utilities + Theme Selector (Claro / Oscuro / Sistema) + Circular (+) Button */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          {/* Segmented Theme Selector in Top Header: Claro / Oscuro / Sistema */}
+          <div
+            role="group"
+            aria-label="Seleccionar tema de interfaz"
+            className="flex items-center bg-slate-100 dark:bg-[#12151E] border border-slate-200/90 dark:border-white/10 rounded-xl p-0.5 text-[11px] font-medium transition-colors"
+          >
+            {(
+              [
+                { id: 'light', label: 'Claro', Icon: Sun, title: 'Interfaz clara (Blanco alabastro)' },
+                { id: 'dark', label: 'Oscuro', Icon: Moon, title: 'Interfaz oscura (Estudio nocturno)' },
+                { id: 'system', label: 'Sistema', Icon: Monitor, title: 'Tema automático según sistema' },
+              ] as const
+            ).map(({ id, label, Icon, title }) => {
+              const isSelected = themeMode === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => {
+                    setThemeMode(id);
+                    notify(
+                      id === 'light'
+                        ? 'Tema claro activado'
+                        : id === 'dark'
+                        ? 'Tema oscuro activado'
+                        : `Tema según sistema (${systemPrefersDark ? 'Oscuro' : 'Claro'})`
+                    );
+                  }}
+                  title={title}
+                  aria-label={title}
+                  aria-pressed={isSelected}
+                  className={`${
+                    isMobileLandscape ? 'h-6 px-1.5' : 'h-7 px-2'
+                  } rounded-lg flex items-center gap-1 transition-all cursor-pointer ${
+                    isSelected
+                      ? 'bg-amber-500 text-slate-950 font-semibold shadow-xs'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                  }`}
+                >
+                  <Icon className="w-3.5 h-3.5 shrink-0" />
+                  <span className="hidden md:inline">{label}</span>
+                </button>
+              );
+            })}
+          </div>
+
           {isSplitLayout && (
             <div
-              className="flex items-center bg-[#12151E] border border-white/10 rounded-lg p-0.5 text-[10px] font-mono-tabular"
+              className="hidden sm:flex items-center bg-slate-100 dark:bg-[#12151E] border border-slate-200 dark:border-white/10 rounded-lg p-0.5 text-[10px] font-mono-tabular"
               title="Ajustar proporción de ancho: Reproductor (Izquierda) / Listas (Derecha)"
             >
               {[
@@ -1725,7 +1786,7 @@ export default function App() {
                   className={`px-1.5 py-1 rounded-md transition-colors cursor-pointer ${
                     Math.abs(leftSplitPct - preset.pct) <= 3
                       ? 'bg-amber-500 text-slate-950 font-semibold'
-                      : 'text-slate-400 hover:text-white'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                   }`}
                 >
                   {preset.label}
@@ -1759,7 +1820,7 @@ export default function App() {
       {showUrlPopover && (
         <>
           <div
-            className="fixed inset-0 z-40 bg-black/25"
+            className="fixed inset-0 z-40 bg-slate-900/20 dark:bg-black/25"
             onClick={() => {
               if (!isResolving) setShowUrlPopover(false);
             }}
@@ -1770,7 +1831,7 @@ export default function App() {
             aria-label="Pega enlace YouTube"
             className={`fixed ${
               isMobileLandscape ? 'top-12 right-2.5' : 'top-15 right-3 sm:right-6'
-            } z-50 w-[min(92vw,360px)] rounded-2xl bg-[#12151E] border border-white/15 shadow-2xl p-3.5 backdrop-blur-xl`}
+            } z-50 w-[min(92vw,360px)] rounded-2xl bg-white dark:bg-[#12151E] border border-slate-200 dark:border-white/15 shadow-2xl p-3.5 backdrop-blur-xl`}
           >
             <form
               onSubmit={(e) => {
@@ -1781,7 +1842,7 @@ export default function App() {
             >
               <label
                 htmlFor="youtube-url-popover-input"
-                className="text-xs font-semibold text-slate-200 tracking-wide"
+                className="text-xs font-semibold text-slate-800 dark:text-slate-200 tracking-wide"
               >
                 Pega enlace YouTube
               </label>
@@ -1798,7 +1859,7 @@ export default function App() {
                     }
                   }}
                   placeholder="Pega enlace YouTube"
-                  className="flex-1 min-w-0 min-h-[40px] px-3 rounded-xl bg-[#090A0F] border border-white/10 text-xs sm:text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500 transition-colors"
+                  className="flex-1 min-w-0 min-h-[40px] px-3 rounded-xl bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 text-xs sm:text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-amber-500 transition-colors"
                   disabled={isResolving}
                 />
                 <button
@@ -1825,14 +1886,14 @@ export default function App() {
           <div
             className={`px-4 py-2 rounded-xl border shadow-xl backdrop-blur-md text-xs font-medium flex items-center gap-2 ${
               feedbackMsg.type === 'error'
-                ? 'bg-red-950/90 border-red-500/40 text-red-200'
-                : 'bg-[#12151E]/95 border-amber-500/40 text-slate-100'
+                ? 'bg-red-50 dark:bg-red-950/90 border-red-300 dark:border-red-500/40 text-red-800 dark:text-red-200'
+                : 'bg-white/95 dark:bg-[#12151E]/95 border-amber-500/50 dark:border-amber-500/40 text-slate-900 dark:text-slate-100'
             }`}
           >
             {feedbackMsg.type === 'error' ? (
-              <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+              <AlertCircle className="w-4 h-4 text-red-500 dark:text-red-400 shrink-0" />
             ) : (
-              <Check className="w-4 h-4 text-amber-400 shrink-0" />
+              <Check className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
             )}
             <span className="truncate">{feedbackMsg.text}</span>
           </div>
@@ -1862,19 +1923,19 @@ export default function App() {
           className={`relative h-full min-h-0 shrink-0 flex flex-col justify-between ${
             isPureOledActive
               ? 'bg-black border-amber-500/15'
-              : 'bg-[#12151E] border-white/[0.08]'
+              : 'bg-white dark:bg-[#12151E] border-slate-200/90 dark:border-white/[0.08] shadow-sm dark:shadow-none'
           } border rounded-2xl ${
             isMobileLandscape ? 'p-2.5' : 'p-3.5 sm:p-5'
-          } overflow-hidden transition-all duration-700 ${
-            isSplitLayout || activeTab === 'player' ? 'flex' : 'hidden'
-          }`}
+          } overflow-hidden transition-colors duration-300 ${
+            !isSplitLayout ? tabTransitionClass : ''
+          } ${isSplitLayout || activeTab === 'player' ? 'flex' : 'hidden'}`}
         >
           {/* Ambient Blurred Video Thumbnail Aura Behind Player (Reduced in Forced OLED Mode) */}
           {currentTrack?.thumbnailUrl && (
             <div
               aria-hidden="true"
               className={`pointer-events-none absolute -inset-8 z-0 ${
-                isPureOledActive ? 'opacity-5' : 'opacity-20'
+                isPureOledActive ? 'opacity-5' : 'opacity-10 dark:opacity-20'
               } blur-3xl transition-opacity duration-700`}
               style={{
                 backgroundImage: `url(${currentTrack.thumbnailUrl})`,
@@ -1884,10 +1945,24 @@ export default function App() {
             />
           )}
 
-          {/* Top Status Row: Clean Unboxed Metadata */}
-          <div className="relative z-10 flex items-center justify-between gap-2 text-[11px] sm:text-xs text-slate-400 shrink-0">
+          {/* Top Status Row: Clean Unboxed Metadata with Estimated Bitrate & Track Quality */}
+          <div className="relative z-10 flex items-center justify-between gap-2 text-[11px] sm:text-xs text-slate-600 dark:text-slate-400 shrink-0">
             <div className="flex items-center gap-1.5 truncate">
-              <span className="text-amber-400 font-medium">Audio Puro</span>
+              <span className="text-amber-600 dark:text-amber-400 font-semibold">Audio Puro</span>
+              <span aria-hidden="true">·</span>
+              <button
+                type="button"
+                onClick={() =>
+                  notify(
+                    `Calidad de pista actual: ${audioQuality.codec} ~${audioQuality.bitrateKbps} kbps (${audioQuality.tierLabel} · 48 kHz)`
+                  )
+                }
+                title={`Bitrate estimado: ~${audioQuality.bitrateKbps} kbps (${audioQuality.codec} · Calidad ${audioQuality.tierLabel})`}
+                className="font-mono-tabular text-slate-800 dark:text-slate-200 hover:text-amber-600 dark:hover:text-amber-300 transition-colors truncate cursor-pointer"
+              >
+                ~{audioQuality.bitrateKbps} kbps {audioQuality.tierLabel}
+                <span className="hidden sm:inline text-slate-500 dark:text-slate-400"> · {audioQuality.codec}</span>
+              </button>
               <span aria-hidden="true">·</span>
               <span className="truncate">
                 {isMobileLandscape ? '2º Plano' : 'Media Session Activa'}
@@ -1896,7 +1971,7 @@ export default function App() {
                 <>
                   <span aria-hidden="true">·</span>
                   <span
-                    className="text-amber-300/90 font-mono-tabular truncate"
+                    className="text-amber-600 dark:text-amber-300/90 font-mono-tabular truncate"
                     title={`Tema oscuro forzado / Atenuación activa (${systemClock.formatted})`}
                   >
                     {isPureOledActive ? 'OLED' : 'Atenuado'} -{nightDim.dimLevelPct}%
@@ -1906,7 +1981,7 @@ export default function App() {
               {sleepRemainingSec !== null && (
                 <>
                   <span aria-hidden="true">·</span>
-                  <span className="text-amber-300 font-mono-tabular">
+                  <span className="text-amber-600 dark:text-amber-300 font-mono-tabular">
                     {formatDuration(sleepRemainingSec)}
                   </span>
                 </>
@@ -1914,7 +1989,7 @@ export default function App() {
               {sleepOnTrackEnd && (
                 <>
                   <span aria-hidden="true">·</span>
-                  <span className="text-amber-300">Fin pista</span>
+                  <span className="text-amber-600 dark:text-amber-300">Fin pista</span>
                 </>
               )}
             </div>
@@ -1924,10 +1999,10 @@ export default function App() {
                 onClick={() => setModalTrackForPlaylist(currentTrack)}
                 className={`${
                   isMobileLandscape ? 'min-h-[28px] px-2 text-[11px]' : 'min-h-[34px] px-2.5 text-xs'
-                } rounded-lg hover:bg-white/10 text-slate-200 hover:text-amber-400 flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
+                } rounded-lg hover:bg-slate-100 dark:hover:bg-white/10 text-slate-700 dark:text-slate-200 hover:text-amber-600 dark:hover:text-amber-400 flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
                 title="Guardar pista actual en una lista"
               >
-                <BookmarkPlus className="w-3.5 h-3.5 text-amber-400" />
+                <BookmarkPlus className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
                 <span>Guardar</span>
               </button>
             )}
@@ -1936,7 +2011,7 @@ export default function App() {
           {/* Center Prominent Video Thumbnail Showcase, Track Title & 1-Tap Channel Subscribe Action */}
           {isMobileLandscape ? (
             /* Mobile Landscape Prominent Widescreen Hero Stage */
-            <div className="relative z-10 flex-1 min-h-[78px] my-1.5 w-full rounded-xl overflow-hidden border border-white/15 shadow-2xl group bg-[#090A0F] flex flex-col justify-end">
+            <div className="relative z-10 flex-1 min-h-[78px] my-1.5 w-full rounded-xl overflow-hidden border border-slate-300 dark:border-white/15 shadow-lg dark:shadow-2xl group bg-slate-900 dark:bg-[#090A0F] flex flex-col justify-end">
               <TrackArtwork
                 src={currentTrack?.thumbnailUrl || ''}
                 videoId={currentTrack?.videoId}
@@ -2010,7 +2085,7 @@ export default function App() {
           ) : (
             /* Portrait & Desktop Prominent 16:9 Widescreen Video Thumbnail Showcase */
             <div className="relative z-10 flex-1 min-h-0 flex flex-col items-center justify-center my-1.5 sm:my-2 text-center overflow-hidden">
-              <div className="relative w-full max-w-[480px] aspect-video max-h-[32dvh] sm:max-h-[38dvh] rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.7)] ring-1 ring-white/15 overflow-hidden group">
+              <div className="relative w-full max-w-[480px] aspect-video max-h-[32dvh] sm:max-h-[38dvh] rounded-2xl shadow-xl dark:shadow-[0_20px_50px_rgba(0,0,0,0.7)] ring-1 ring-slate-900/10 dark:ring-white/15 overflow-hidden group">
                 <TrackArtwork
                   src={currentTrack?.thumbnailUrl || ''}
                   videoId={currentTrack?.videoId}
@@ -2056,12 +2131,12 @@ export default function App() {
               </div>
 
               <div className="mt-2.5 sm:mt-3.5 w-full max-w-lg px-1">
-                <h1 className="text-base sm:text-xl font-bold font-display text-white line-clamp-2 leading-snug">
+                <h1 className="text-base sm:text-xl font-bold font-display text-slate-900 dark:text-white line-clamp-2 leading-snug">
                   {currentTrack ? currentTrack.title : 'Pega un enlace de YouTube'}
                 </h1>
 
-                <div className="mt-1.5 flex items-center justify-center flex-wrap gap-2 text-xs sm:text-sm text-slate-400">
-                  <span className="truncate max-w-[200px] sm:max-w-[260px] font-medium text-slate-200">
+                <div className="mt-1.5 flex items-center justify-center flex-wrap gap-2 text-xs sm:text-sm text-slate-600 dark:text-slate-400">
+                  <span className="truncate max-w-[200px] sm:max-w-[260px] font-medium text-slate-700 dark:text-slate-200">
                     {currentTrack ? currentTrack.author : 'Sin pista activa'}
                   </span>
 
@@ -2071,8 +2146,8 @@ export default function App() {
                       disabled={isSubscribingChannel}
                       className={`min-h-[30px] px-2.5 py-1 rounded-lg border text-xs font-medium inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                         isCurrentAuthorSubscribed
-                          ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 hover:bg-amber-500/25'
-                          : 'bg-[#090A0F] border-white/10 text-slate-200 hover:border-amber-500/50 hover:text-amber-400'
+                          ? 'bg-amber-500/15 border-amber-500/40 text-amber-700 dark:text-amber-300 hover:bg-amber-500/25'
+                          : 'bg-slate-50 dark:bg-[#090A0F] border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-200 hover:border-amber-500/50 hover:text-amber-600 dark:hover:text-amber-400'
                       }`}
                       title={
                         isCurrentAuthorSubscribed
@@ -2082,12 +2157,12 @@ export default function App() {
                     >
                       {isCurrentAuthorSubscribed ? (
                         <>
-                          <UserCheck className="w-3.5 h-3.5 text-amber-400" />
+                          <UserCheck className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
                           <span>Suscrito</span>
                         </>
                       ) : (
                         <>
-                          <UserPlus className="w-3.5 h-3.5 text-amber-400" />
+                          <UserPlus className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
                           <span>Suscribirse</span>
                         </>
                       )}
@@ -2114,11 +2189,11 @@ export default function App() {
                 onChange={(e) => seekToAbsolute(parseFloat(e.target.value))}
                 className={`w-full ${
                   isMobileLandscape ? 'h-5' : 'h-6'
-                } audio-scrubber bg-white/10 rounded-full`}
+                } audio-scrubber bg-slate-200 dark:bg-white/10 rounded-full`}
                 aria-label="Posición de reproducción"
               />
             </div>
-            <div className="flex items-center justify-between text-[11px] sm:text-xs text-slate-400 font-mono-tabular">
+            <div className="flex items-center justify-between text-[11px] sm:text-xs text-slate-500 dark:text-slate-400 font-mono-tabular">
               <span>{formatDuration(currentTime)}</span>
               <span>
                 {isBuffering
@@ -2139,19 +2214,19 @@ export default function App() {
               onClick={() => seekBySeconds(-10)}
               className={`${
                 isMobileLandscape ? 'min-h-[36px] min-w-[36px]' : 'min-h-[44px] min-w-[44px]'
-              } rounded-xl text-slate-300 hover:text-white hover:bg-white/5 flex flex-col items-center justify-center transition-colors cursor-pointer`}
+              } rounded-xl text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-white/5 flex flex-col items-center justify-center transition-colors cursor-pointer`}
               title="Retroceder 10 segundos"
               aria-label="Retroceder 10 segundos"
             >
               <RotateCcw className={isMobileLandscape ? 'w-4 h-4' : 'w-5 h-5'} />
-              <span className="text-[9px] font-mono-tabular text-slate-400">-10s</span>
+              <span className="text-[9px] font-mono-tabular text-slate-500 dark:text-slate-400">-10s</span>
             </button>
 
             <button
               onClick={handlePrevTrack}
               className={`${
                 isMobileLandscape ? 'min-h-[38px] min-w-[38px]' : 'min-h-[48px] min-w-[48px]'
-              } rounded-xl text-slate-200 hover:text-white hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
+              } rounded-xl text-slate-700 dark:text-slate-200 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
               title="Pista anterior"
               aria-label="Pista anterior"
             >
@@ -2181,7 +2256,7 @@ export default function App() {
               onClick={handleNextTrack}
               className={`${
                 isMobileLandscape ? 'min-h-[38px] min-w-[38px]' : 'min-h-[48px] min-w-[48px]'
-              } rounded-xl text-slate-200 hover:text-white hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
+              } rounded-xl text-slate-700 dark:text-slate-200 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
               title="Siguiente pista"
               aria-label="Siguiente pista"
             >
@@ -2192,20 +2267,20 @@ export default function App() {
               onClick={() => seekBySeconds(10)}
               className={`${
                 isMobileLandscape ? 'min-h-[36px] min-w-[36px]' : 'min-h-[44px] min-w-[44px]'
-              } rounded-xl text-slate-300 hover:text-white hover:bg-white/5 flex flex-col items-center justify-center transition-colors cursor-pointer`}
+              } rounded-xl text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-white/5 flex flex-col items-center justify-center transition-colors cursor-pointer`}
               title="Adelantar 10 segundos"
               aria-label="Adelantar 10 segundos"
             >
               <RotateCw className={isMobileLandscape ? 'w-4 h-4' : 'w-5 h-5'} />
-              <span className="text-[9px] font-mono-tabular text-slate-400">+10s</span>
+              <span className="text-[9px] font-mono-tabular text-slate-500 dark:text-slate-400">+10s</span>
             </button>
           </div>
 
-          {/* Secondary Studio Utility Bar: Speed (0.5x-2x), Sleep Timer, System-Time Auto Dimmer, Repeat & Volume */}
+          {/* Secondary Studio Utility Bar: Speed (0.5x-2x), Sleep Timer, Appearance & System-Time Auto Dimmer, Repeat & Volume */}
           <div
             className={`${
               isMobileLandscape ? 'mt-1.5 pt-1.5' : 'mt-3 pt-2.5'
-            } border-t border-white/[0.07] flex items-center justify-between gap-1 shrink-0 relative z-20`}
+            } border-t border-slate-200 dark:border-white/[0.07] flex items-center justify-between gap-1 shrink-0 relative z-20`}
           >
             {/* Playback Speed Control */}
             <div className="relative">
@@ -2219,18 +2294,18 @@ export default function App() {
                   isMobileLandscape ? 'min-h-[32px] px-2 text-[11px]' : 'min-h-[44px] px-2.5 text-xs'
                 } rounded-xl border font-mono-tabular font-medium flex items-center gap-1 transition-colors cursor-pointer ${
                   playbackRate !== 1
-                    ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
-                    : 'bg-[#090A0F] border-white/10 text-slate-300 hover:text-white'
+                    ? 'bg-amber-500/15 border-amber-500/40 text-amber-700 dark:text-amber-300'
+                    : 'bg-slate-50 dark:bg-[#090A0F] border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
                 }`}
                 title="Velocidad de reproducción"
               >
-                <Gauge className="w-3.5 h-3.5 text-amber-400" />
+                <Gauge className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
                 <span>{playbackRate}x</span>
               </button>
 
               {showSpeedMenu && (
-                <div className="absolute bottom-11 left-0 z-40 w-44 rounded-2xl bg-[#090A0F] border border-white/15 p-2 shadow-2xl">
-                  <p className="px-2 py-1 text-[11px] font-medium text-slate-400">
+                <div className="absolute bottom-11 left-0 z-40 w-44 rounded-2xl bg-white dark:bg-[#090A0F] border border-slate-200 dark:border-white/15 p-2 shadow-2xl">
+                  <p className="px-2 py-1 text-[11px] font-medium text-slate-500 dark:text-slate-400">
                     Velocidad de audio
                   </p>
                   <div className="grid grid-cols-2 gap-1 mt-1">
@@ -2245,7 +2320,7 @@ export default function App() {
                         className={`min-h-[34px] rounded-xl text-xs font-mono-tabular font-medium transition-colors cursor-pointer ${
                           playbackRate === rate
                             ? 'bg-amber-500 text-slate-950 font-semibold'
-                            : 'text-slate-300 hover:bg-white/10'
+                            : 'text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-white/10'
                         }`}
                       >
                         {rate}x
@@ -2268,12 +2343,12 @@ export default function App() {
                   isMobileLandscape ? 'min-h-[32px] px-2 text-[11px]' : 'min-h-[44px] px-2.5 text-xs'
                 } rounded-xl border font-medium flex items-center gap-1 transition-colors cursor-pointer ${
                   sleepRemainingSec !== null || sleepOnTrackEnd
-                    ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
-                    : 'bg-[#090A0F] border-white/10 text-slate-300 hover:text-white'
+                    ? 'bg-amber-500/15 border-amber-500/40 text-amber-700 dark:text-amber-300'
+                    : 'bg-slate-50 dark:bg-[#090A0F] border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
                 }`}
                 title="Temporizador de apagado automático (Sleep Timer)"
               >
-                <Moon className="w-3.5 h-3.5 text-amber-400" />
+                <Moon className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
                 <span className="font-mono-tabular">
                   {sleepRemainingSec !== null
                     ? formatDuration(sleepRemainingSec)
@@ -2284,8 +2359,8 @@ export default function App() {
               </button>
 
               {showSleepMenu && (
-                <div className="absolute bottom-11 left-1/2 -translate-x-1/2 z-40 w-44 rounded-2xl bg-[#090A0F] border border-white/15 p-2 shadow-2xl">
-                  <p className="px-2 py-1 text-[11px] font-medium text-slate-400">
+                <div className="absolute bottom-11 left-1/2 -translate-x-1/2 z-40 w-44 rounded-2xl bg-white dark:bg-[#090A0F] border border-slate-200 dark:border-white/15 p-2 shadow-2xl">
+                  <p className="px-2 py-1 text-[11px] font-medium text-slate-500 dark:text-slate-400">
                     Apagado automático
                   </p>
                   <div className="space-y-1 mt-1">
@@ -2300,7 +2375,7 @@ export default function App() {
                           className={`w-full min-h-[34px] px-2.5 rounded-xl text-xs font-medium text-left flex items-center justify-between transition-colors cursor-pointer ${
                             isActive
                               ? 'bg-amber-500 text-slate-950 font-semibold'
-                              : 'text-slate-300 hover:bg-white/10'
+                              : 'text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-white/10'
                           }`}
                         >
                           <span>{opt.label}</span>
@@ -2313,7 +2388,7 @@ export default function App() {
               )}
             </div>
 
-            {/* Automatic System-Time Nocturnal Dimmer & Forced OLED Dark Theme */}
+            {/* Appearance Menu: Theme Selector (Claro / Oscuro / Sistema) + Nocturnal Dimmer & OLED */}
             <div className="relative">
               <button
                 onClick={() => {
@@ -2325,79 +2400,130 @@ export default function App() {
                   isMobileLandscape ? 'min-h-[32px] px-2 text-[11px]' : 'min-h-[44px] px-2.5 text-xs'
                 } rounded-xl border font-medium flex items-center gap-1 transition-colors cursor-pointer ${
                   isNightDimActive
-                    ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
-                    : nightDim.mode === 'auto'
-                    ? 'bg-[#090A0F] border-amber-500/25 text-slate-200 hover:text-white'
-                    : 'bg-[#090A0F] border-white/10 text-slate-300 hover:text-white'
+                    ? 'bg-amber-500/15 border-amber-500/40 text-amber-700 dark:text-amber-300'
+                    : 'bg-slate-50 dark:bg-[#090A0F] border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
                 }`}
-                title="Temporizador automático de tema oscuro forzado y atenuación de brillo por hora del sistema"
+                title="Apariencia: Tema Claro, Oscuro o Sistema y atenuación nocturna OLED"
               >
-                <SunDim className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                {themeMode === 'light' ? (
+                  <Sun className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+                ) : (
+                  <SunDim className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+                )}
                 <span className="font-mono-tabular">
-                  {isNightDimActive
+                  {themeMode === 'light'
+                    ? 'Claro'
+                    : isNightDimActive
                     ? `-${nightDim.dimLevelPct}%`
-                    : nightDim.mode === 'auto'
-                    ? `${String(nightDim.startHour).padStart(2, '0')}h`
-                    : 'Brillo'}
+                    : themeMode === 'system'
+                    ? 'Auto'
+                    : 'Oscuro'}
                 </span>
               </button>
 
               {showNightDimMenu && (
-                <div className="absolute bottom-11 right-0 sm:left-1/2 sm:-translate-x-1/2 z-40 w-64 rounded-2xl bg-[#090A0F] border border-white/15 p-3 shadow-2xl space-y-2.5">
-                  <div className="flex items-center justify-between gap-2 border-b border-white/10 pb-2">
+                <div className="absolute bottom-11 right-0 sm:left-1/2 sm:-translate-x-1/2 z-40 w-68 rounded-2xl bg-white dark:bg-[#090A0F] border border-slate-200 dark:border-white/15 p-3 shadow-2xl space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 border-b border-slate-200 dark:border-white/10 pb-2">
                     <div>
-                      <p className="text-xs font-semibold text-white">
-                        Brillo & OLED Nocturno
+                      <p className="text-xs font-semibold text-slate-900 dark:text-white">
+                        Apariencia & Brillo Nocturno
                       </p>
-                      <p className="text-[10px] text-slate-400 flex items-center gap-1 mt-0.5 font-mono-tabular">
-                        <Clock className="w-3 h-3 text-amber-400" />
+                      <p className="text-[10px] text-slate-500 dark:text-slate-400 flex items-center gap-1 mt-0.5 font-mono-tabular">
+                        <Clock className="w-3 h-3 text-amber-600 dark:text-amber-400" />
                         <span>Sistema: {systemClock.formatted}</span>
                         <span>·</span>
-                        <span className={isNightDimActive ? 'text-amber-300' : 'text-slate-400'}>
-                          {isNightDimActive ? 'Activo' : 'En espera'}
+                        <span className="text-amber-600 dark:text-amber-300">
+                          {isDarkTheme ? 'Modo Oscuro' : 'Modo Claro'}
                         </span>
                       </p>
                     </div>
                   </div>
 
-                  {/* Mode Selector: Auto (System Time), Forced, Off */}
-                  <div className="grid grid-cols-3 gap-1 bg-[#12151E] p-1 rounded-xl border border-white/10">
-                    {(
-                      [
-                        { id: 'auto', label: 'Auto (Hora)' },
-                        { id: 'forced', label: 'Forzar' },
-                        { id: 'off', label: 'Apagado' },
-                      ] as const
-                    ).map((m) => (
-                      <button
-                        key={m.id}
-                        type="button"
-                        onClick={() => {
-                          setNightDim((prev) => ({ ...prev, mode: m.id }));
-                          notify(
-                            m.id === 'auto'
-                              ? `Atenuación automática (${String(nightDim.startHour).padStart(2, '0')}:00 - ${String(nightDim.endHour).padStart(2, '0')}:00)`
-                              : m.id === 'forced'
-                              ? 'Tema oscuro OLED y atenuación forzados'
-                              : 'Atenuación nocturna desactivada'
-                          );
-                        }}
-                        className={`py-1.5 px-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer ${
-                          nightDim.mode === m.id
-                            ? 'bg-amber-500 text-slate-950 font-semibold'
-                            : 'text-slate-300 hover:text-white'
-                        }`}
-                      >
-                        {m.label}
-                      </button>
-                    ))}
+                  {/* Theme Mode Selector inside Player Appearance Menu: Claro / Oscuro / Sistema */}
+                  <div className="space-y-1">
+                    <span className="block text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                      Tema de interfaz
+                    </span>
+                    <div className="grid grid-cols-3 gap-1 bg-slate-100 dark:bg-[#12151E] p-1 rounded-xl border border-slate-200 dark:border-white/10">
+                      {(
+                        [
+                          { id: 'light', label: 'Claro', Icon: Sun },
+                          { id: 'dark', label: 'Oscuro', Icon: Moon },
+                          { id: 'system', label: 'Sistema', Icon: Monitor },
+                        ] as const
+                      ).map(({ id, label, Icon }) => (
+                        <button
+                          key={id}
+                          type="button"
+                          onClick={() => {
+                            setThemeMode(id);
+                            notify(
+                              id === 'light'
+                                ? 'Tema claro activado'
+                                : id === 'dark'
+                                ? 'Tema oscuro activado'
+                                : `Tema según sistema (${systemPrefersDark ? 'Oscuro' : 'Claro'})`
+                            );
+                          }}
+                          className={`py-1.5 px-1 rounded-lg text-[11px] font-medium flex items-center justify-center gap-1 transition-colors cursor-pointer ${
+                            themeMode === id
+                              ? 'bg-amber-500 text-slate-950 font-semibold shadow-xs'
+                              : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                          }`}
+                        >
+                          <Icon className="w-3 h-3 shrink-0" />
+                          <span>{label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Nocturnal Dimmer Mode Selector: Auto (System Time), Forced, Off */}
+                  <div className="space-y-1 pt-1 border-t border-slate-200 dark:border-white/10">
+                    <span className="block text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                      Atenuación nocturna (Modo oscuro)
+                    </span>
+                    <div className="grid grid-cols-3 gap-1 bg-slate-100 dark:bg-[#12151E] p-1 rounded-xl border border-slate-200 dark:border-white/10">
+                      {(
+                        [
+                          { id: 'auto', label: 'Auto (Hora)' },
+                          { id: 'forced', label: 'Forzar' },
+                          { id: 'off', label: 'Apagado' },
+                        ] as const
+                      ).map((m) => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => {
+                            setNightDim((prev) => ({ ...prev, mode: m.id }));
+                            if (m.id === 'forced' && !isDarkTheme) {
+                              setThemeMode('dark');
+                            }
+                            notify(
+                              m.id === 'auto'
+                                ? `Atenuación automática (${String(nightDim.startHour).padStart(2, '0')}:00 - ${String(nightDim.endHour).padStart(2, '0')}:00)`
+                                : m.id === 'forced'
+                                ? 'Tema oscuro OLED y atenuación forzados'
+                                : 'Atenuación nocturna desactivada'
+                            );
+                          }}
+                          className={`py-1.5 px-1 rounded-lg text-[11px] font-medium transition-colors cursor-pointer ${
+                            nightDim.mode === m.id
+                              ? 'bg-amber-500 text-slate-950 font-semibold'
+                              : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                          }`}
+                        >
+                          {m.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
 
                   {/* Automatic System Hour Window Selector */}
                   {nightDim.mode === 'auto' && (
                     <div className="grid grid-cols-2 gap-2 pt-0.5">
                       <div>
-                        <label className="block text-[10px] text-slate-400 mb-1">
+                        <label className="block text-[10px] text-slate-500 dark:text-slate-400 mb-1">
                           Activar desde
                         </label>
                         <select
@@ -2408,7 +2534,7 @@ export default function App() {
                               startHour: parseInt(e.target.value, 10),
                             }))
                           }
-                          className="w-full h-8 px-2 rounded-lg bg-[#12151E] border border-white/10 text-xs text-slate-100 font-mono-tabular focus:outline-none focus:border-amber-500"
+                          className="w-full h-8 px-2 rounded-lg bg-slate-50 dark:bg-[#12151E] border border-slate-200 dark:border-white/10 text-xs text-slate-900 dark:text-slate-100 font-mono-tabular focus:outline-none focus:border-amber-500"
                         >
                           {[18, 19, 20, 21, 22, 23, 0].map((hr) => (
                             <option key={hr} value={hr}>
@@ -2418,7 +2544,7 @@ export default function App() {
                         </select>
                       </div>
                       <div>
-                        <label className="block text-[10px] text-slate-400 mb-1">
+                        <label className="block text-[10px] text-slate-500 dark:text-slate-400 mb-1">
                           Hasta las
                         </label>
                         <select
@@ -2429,7 +2555,7 @@ export default function App() {
                               endHour: parseInt(e.target.value, 10),
                             }))
                           }
-                          className="w-full h-8 px-2 rounded-lg bg-[#12151E] border border-white/10 text-xs text-slate-100 font-mono-tabular focus:outline-none focus:border-amber-500"
+                          className="w-full h-8 px-2 rounded-lg bg-slate-50 dark:bg-[#12151E] border border-slate-200 dark:border-white/10 text-xs text-slate-900 dark:text-slate-100 font-mono-tabular focus:outline-none focus:border-amber-500"
                         >
                           {[5, 6, 7, 8, 9, 10].map((hr) => (
                             <option key={hr} value={hr}>
@@ -2444,8 +2570,8 @@ export default function App() {
                   {/* Brightness Attenuation Level Slider */}
                   <div className="space-y-1">
                     <div className="flex items-center justify-between text-[11px]">
-                      <span className="text-slate-300">Atenuación de brillo</span>
-                      <span className="text-amber-400 font-mono-tabular font-semibold">
+                      <span className="text-slate-700 dark:text-slate-300">Atenuación de brillo</span>
+                      <span className="text-amber-600 dark:text-amber-400 font-mono-tabular font-semibold">
                         -{nightDim.dimLevelPct}%
                       </span>
                     </div>
@@ -2461,7 +2587,7 @@ export default function App() {
                           dimLevelPct: parseInt(e.target.value, 10),
                         }))
                       }
-                      className="w-full h-5 audio-scrubber bg-white/10 rounded-full"
+                      className="w-full h-5 audio-scrubber bg-slate-200 dark:bg-white/10 rounded-full"
                       aria-label="Nivel de atenuación de brillo"
                     />
                   </div>
@@ -2475,14 +2601,14 @@ export default function App() {
                         pureOledBlack: !prev.pureOledBlack,
                       }))
                     }
-                    className="w-full py-1.5 px-2.5 rounded-xl bg-[#12151E] border border-white/10 hover:border-amber-500/40 flex items-center justify-between text-xs text-slate-200 cursor-pointer transition-colors"
+                    className="w-full py-1.5 px-2.5 rounded-xl bg-slate-50 dark:bg-[#12151E] border border-slate-200 dark:border-white/10 hover:border-amber-500/40 flex items-center justify-between text-xs text-slate-800 dark:text-slate-200 cursor-pointer transition-colors"
                   >
                     <span>Tema OLED Negro Puro</span>
                     <span
                       className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
                         nightDim.pureOledBlack
-                          ? 'bg-amber-500/20 text-amber-300'
-                          : 'bg-white/5 text-slate-400'
+                          ? 'bg-amber-500/20 text-amber-700 dark:text-amber-300'
+                          : 'bg-slate-200 dark:bg-white/5 text-slate-600 dark:text-slate-400'
                       }`}
                     >
                       {nightDim.pureOledBlack ? 'ON' : 'OFF'}
@@ -2512,14 +2638,14 @@ export default function App() {
                   : 'min-h-[44px] min-w-[44px] px-2.5'
               } rounded-xl border text-xs font-medium flex items-center justify-center gap-1 transition-colors cursor-pointer ${
                 repeatMode !== 'off'
-                  ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
-                  : 'bg-[#090A0F] border-white/10 text-slate-300 hover:text-white'
+                  ? 'bg-amber-500/15 border-amber-500/40 text-amber-700 dark:text-amber-300'
+                  : 'bg-slate-50 dark:bg-[#090A0F] border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
               }`}
               title="Modo de repetición"
               aria-label="Modo de repetición"
             >
               {repeatMode === 'one' ? (
-                <Repeat1 className="w-3.5 h-3.5 text-amber-400" />
+                <Repeat1 className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
               ) : (
                 <Repeat className="w-3.5 h-3.5" />
               )}
@@ -2536,12 +2662,12 @@ export default function App() {
               }}
               className={`${
                 isMobileLandscape ? 'min-h-[32px] min-w-[32px]' : 'min-h-[44px] min-w-[44px]'
-              } rounded-xl bg-[#090A0F] border border-white/10 text-slate-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer`}
+              } rounded-xl bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white flex items-center justify-center transition-colors cursor-pointer`}
               title={isMuted ? 'Activar sonido' : 'Silenciar'}
               aria-label={isMuted ? 'Activar sonido' : 'Silenciar'}
             >
               {isMuted ? (
-                <VolumeX className="w-3.5 h-3.5 text-red-400" />
+                <VolumeX className="w-3.5 h-3.5 text-red-500 dark:text-red-400" />
               ) : (
                 <Volume2 className="w-3.5 h-3.5" />
               )}
@@ -2566,13 +2692,13 @@ export default function App() {
             role="separator"
             aria-orientation="vertical"
           >
-            <div className="w-1 h-12 rounded-full bg-white/15 group-hover:bg-amber-500/70 group-active:bg-amber-400 transition-colors" />
+            <div className="w-1 h-12 rounded-full bg-slate-300 dark:bg-white/15 group-hover:bg-amber-500/70 group-active:bg-amber-400 transition-colors" />
           </div>
         )}
 
         {/* RIGHT COLUMN: PLAYLISTS & SIMPLIFIED RESIZABLE OPTIONS */}
         <section
-          className={`flex-1 min-w-0 h-full min-h-0 flex flex-col bg-[#12151E] border border-white/[0.07] rounded-2xl overflow-hidden ${
+          className={`flex-1 min-w-0 h-full min-h-0 flex flex-col bg-white dark:bg-[#12151E] border border-slate-200/90 dark:border-white/[0.07] shadow-sm dark:shadow-none rounded-2xl overflow-hidden transition-colors duration-300 ${
             !isSplitLayout && activeTab === 'player' ? 'hidden' : 'flex'
           }`}
         >
@@ -2580,49 +2706,52 @@ export default function App() {
           <div
             className={`${
               isMobileLandscape ? 'px-2.5 py-1.5' : 'px-3 sm:px-5 py-2'
-            } w-full min-w-0 border-b border-white/[0.07] flex items-center justify-between gap-2 shrink-0 overflow-hidden`}
+            } w-full min-w-0 border-b border-slate-200 dark:border-white/[0.07] flex items-center justify-between gap-2 shrink-0 overflow-hidden`}
           >
-            <div className="flex items-center gap-2 min-w-0">
+            <div
+              key={`header-${rightActiveTab}`}
+              className={`flex items-center gap-2 min-w-0 ${tabTransitionClass}`}
+            >
               {rightActiveTab === 'queue' && (
                 <>
-                  <ListMusic className="w-4 h-4 text-amber-400 shrink-0" />
-                  <h2 className="text-xs sm:text-sm font-semibold font-display text-white truncate">
+                  <ListMusic className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                  <h2 className="text-xs sm:text-sm font-semibold font-display text-slate-900 dark:text-white truncate">
                     Cola de reproducción
                   </h2>
-                  <span className="text-[11px] font-mono-tabular text-slate-400">
-                    ({queue.length})
+                  <span className="text-[11px] font-mono-tabular text-slate-500 dark:text-slate-400">
+                    ({queueSearch.trim() ? `${filteredQueue.length}/${queue.length}` : queue.length})
                   </span>
                 </>
               )}
               {rightActiveTab === 'channels' && (
                 <>
-                  <Radio className="w-4 h-4 text-amber-400 shrink-0" />
-                  <h2 className="text-xs sm:text-sm font-semibold font-display text-white truncate">
+                  <Radio className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                  <h2 className="text-xs sm:text-sm font-semibold font-display text-slate-900 dark:text-white truncate">
                     Canales suscritos
                   </h2>
-                  <span className="text-[11px] font-mono-tabular text-slate-400">
+                  <span className="text-[11px] font-mono-tabular text-slate-500 dark:text-slate-400">
                     ({displayedChannelEpisodes.length})
                   </span>
                 </>
               )}
               {rightActiveTab === 'playlists' && (
                 <>
-                  <FolderPlus className="w-4 h-4 text-amber-400 shrink-0" />
-                  <h2 className="text-xs sm:text-sm font-semibold font-display text-white truncate">
+                  <FolderPlus className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                  <h2 className="text-xs sm:text-sm font-semibold font-display text-slate-900 dark:text-white truncate">
                     Listas de reproducción
                   </h2>
-                  <span className="text-[11px] font-mono-tabular text-slate-400">
+                  <span className="text-[11px] font-mono-tabular text-slate-500 dark:text-slate-400">
                     ({playlists.length})
                   </span>
                 </>
               )}
               {rightActiveTab === 'history' && (
                 <>
-                  <History className="w-4 h-4 text-amber-400 shrink-0" />
-                  <h2 className="text-xs sm:text-sm font-semibold font-display text-white truncate">
+                  <History className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                  <h2 className="text-xs sm:text-sm font-semibold font-display text-slate-900 dark:text-white truncate">
                     Historial de escucha
                   </h2>
-                  <span className="text-[11px] font-mono-tabular text-slate-400">
+                  <span className="text-[11px] font-mono-tabular text-slate-500 dark:text-slate-400">
                     ({history.length})
                   </span>
                 </>
@@ -2632,7 +2761,7 @@ export default function App() {
             {/* Right Controls: Dimensionable Button Size Selector (S/M/L) + Contextual Action */}
             <div className="flex items-center gap-1 shrink-0">
               <div
-                className="flex items-center bg-[#090A0F] border border-white/10 rounded-lg p-0.5 text-[10px] font-mono-tabular"
+                className="flex items-center bg-slate-100 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 rounded-lg p-0.5 text-[10px] font-mono-tabular"
                 title="Redimensionar botones de opciones y listas (Compacto / Estándar / Grande)"
               >
                 {(
@@ -2649,7 +2778,7 @@ export default function App() {
                     className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
                       rightBtnScale === sz.id
                         ? 'bg-amber-500 text-slate-950 font-bold'
-                        : 'text-slate-400 hover:text-white'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                     }`}
                   >
                     {sz.label}
@@ -2661,20 +2790,20 @@ export default function App() {
                 <div className="flex items-center gap-1 shrink-0">
                   <button
                     onClick={() => setActiveTab('playlists')}
-                    className={`${rActionBtnClass} bg-[#090A0F] border border-white/10 hover:border-amber-500/40 font-medium text-slate-300 hover:text-amber-300 flex items-center justify-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
+                    className={`${rActionBtnClass} bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 hover:border-amber-500/40 font-medium text-slate-700 dark:text-slate-300 hover:text-amber-600 dark:hover:text-amber-300 flex items-center justify-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
                     title="Sincronizar listas y pistas con Google Drive"
                     aria-label="Sincronizar con Google Drive"
                   >
-                    <Cloud className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <Cloud className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
                     <span className="hidden md:inline">Drive</span>
                   </button>
                   <button
                     onClick={saveQueueAsPlaylist}
-                    className={`${rActionBtnClass} bg-[#090A0F] border border-white/10 hover:border-amber-500/40 font-medium text-slate-200 flex items-center justify-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
+                    className={`${rActionBtnClass} bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 hover:border-amber-500/40 font-medium text-slate-700 dark:text-slate-200 flex items-center justify-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
                     title="Guardar cola actual como lista"
                     aria-label="Guardar cola actual como lista"
                   >
-                    <FolderPlus className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <FolderPlus className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
                     <span className="hidden md:inline">Guardar</span>
                   </button>
                 </div>
@@ -2683,7 +2812,7 @@ export default function App() {
               {rightActiveTab === 'channels' && newCountByChannel.total > 0 && (
                 <button
                   onClick={handleMarkAllEpisodesAsSeen}
-                  className={`${rActionBtnClass} bg-[#090A0F] border border-white/10 hover:border-amber-500/40 font-medium text-amber-400 flex items-center justify-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
+                  className={`${rActionBtnClass} bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 hover:border-amber-500/40 font-medium text-amber-600 dark:text-amber-400 flex items-center justify-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
                   title="Marcar todos los episodios nuevos como vistos"
                   aria-label="Marcar todos los episodios nuevos como vistos"
                 >
@@ -2700,7 +2829,7 @@ export default function App() {
                   }}
                   title="Limpiar historial"
                   aria-label="Limpiar historial"
-                  className={`${rActionBtnClass} bg-[#090A0F] border border-white/10 hover:border-red-500/40 font-medium text-slate-300 hover:text-red-300 flex items-center justify-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
+                  className={`${rActionBtnClass} bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 hover:border-red-500/40 font-medium text-slate-700 dark:text-slate-300 hover:text-red-500 dark:hover:text-red-300 flex items-center justify-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
                 >
                   <Trash2 className="w-3.5 h-3.5 shrink-0" />
                   <span className="hidden md:inline">Limpiar</span>
@@ -2709,209 +2838,294 @@ export default function App() {
             </div>
           </div>
 
-          {/* TAB 1: INTERACTIVE QUEUE WITH DIRECT DRAG-AND-DROP & TOUCH REORDERING */}
+          {/* TAB 1: INTERACTIVE QUEUE WITH INSTANT SEARCH, DIRECT DRAG-AND-DROP & TOUCH REORDERING */}
           {rightActiveTab === 'queue' && (
             <div
-              ref={queueListRef}
-              className="flex-1 min-h-0 overflow-y-auto custom-scroll p-2.5 sm:p-4 space-y-1"
+              key="tab-panel-queue"
+              className={`flex-1 min-h-0 flex flex-col overflow-hidden ${tabTransitionClass}`}
             >
-              {queue.map((track, idx) => {
-                const isCurrent = idx === currentIndex;
-                const rowKey = `queue-${track.videoId}-${idx}`;
-                const isSelected = selectedVideoKey === rowKey;
-                const isDraggingThis = draggingQueueIdx === idx;
-                const isDragOverThis =
-                  dragOverQueueIdx === idx &&
-                  draggingQueueIdx !== null &&
-                  draggingQueueIdx !== idx;
-                const savedPos = savedPositions[track.videoId] || 0;
-
-                return (
-                  <div
-                    key={rowKey}
-                    data-queue-idx={idx}
-                    draggable
-                    onClick={() => setSelectedVideoKey(rowKey)}
-                    onDragStart={(e) => {
-                      activeDragIdxRef.current = idx;
-                      setDraggingQueueIdx(idx);
-                      setDragOverQueueIdx(idx);
-                      e.dataTransfer.effectAllowed = 'move';
-                      e.dataTransfer.setData('text/plain', String(idx));
-                    }}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      e.dataTransfer.dropEffect = 'move';
-                      if (dragOverQueueIdx !== idx) {
-                        setDragOverQueueIdx(idx);
-                      }
-                    }}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      const fromIdx =
-                        activeDragIdxRef.current ??
-                        parseInt(e.dataTransfer.getData('text/plain'), 10);
-                      if (Number.isFinite(fromIdx) && fromIdx !== idx) {
-                        reorderQueueTrack(fromIdx, idx);
-                      }
-                      activeDragIdxRef.current = null;
-                      setDraggingQueueIdx(null);
-                      setDragOverQueueIdx(null);
-                    }}
-                    onDragEnd={() => {
-                      activeDragIdxRef.current = null;
-                      setDraggingQueueIdx(null);
-                      setDragOverQueueIdx(null);
-                    }}
-                    className={`${
-                      rightBtnScale === 'sm' ? 'py-1.5 px-2' : 'py-2 px-2.5'
-                    } rounded-xl flex items-center justify-between gap-2 transition-all select-none ${
-                      isDraggingThis
-                        ? 'bg-amber-500/20 ring-1 ring-amber-400/70 shadow-xl scale-[1.01] z-20 relative'
-                        : isDragOverThis
-                        ? 'bg-white/[0.06] ring-1 ring-amber-400/50'
-                        : isCurrent
-                        ? 'bg-amber-500/10 border border-amber-500/25'
-                        : isSelected
-                        ? 'bg-white/[0.05] border border-amber-500/30'
-                        : 'hover:bg-white/[0.03] border border-transparent'
-                    }`}
-                  >
-                    {/* Tactile Drag Handle (Touch & Mouse) */}
-                    <div
-                      role="button"
-                      tabIndex={0}
-                      aria-label={`Arrastrar para reordenar ${track.title}`}
-                      title="Arrastra para cambiar el orden en la cola"
-                      onTouchStart={(e) => {
-                        e.stopPropagation();
-                        setSelectedVideoKey(rowKey);
-                        handleStartQueueDrag(idx);
-                      }}
-                      onMouseDown={(e) => {
-                        if (e.button !== 0) return;
-                        e.stopPropagation();
-                        setSelectedVideoKey(rowKey);
-                        handleStartQueueDrag(idx);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'ArrowUp' && idx > 0) {
-                          e.preventDefault();
-                          reorderQueueTrack(idx, idx - 1);
-                        } else if (e.key === 'ArrowDown' && idx < queue.length - 1) {
-                          e.preventDefault();
-                          reorderQueueTrack(idx, idx + 1);
-                        }
-                      }}
-                      className={`${rIconBtnClass} touch-none cursor-grab active:cursor-grabbing text-slate-500 hover:text-amber-400 active:text-amber-300 flex items-center justify-center shrink-0 transition-colors`}
-                    >
-                      <GripVertical className="w-4 h-4" />
+              {/* Instant Queue Search Bar */}
+              <div
+                className={`${
+                  isMobileLandscape ? 'p-2' : 'p-2.5 sm:p-3.5'
+                } border-b border-slate-200 dark:border-white/[0.06] shrink-0`}
+              >
+                <div className="relative flex items-center">
+                  <Search className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500 absolute left-3 pointer-events-none" />
+                  <input
+                    type="text"
+                    value={queueSearch}
+                    onChange={(e) => setQueueSearch(e.target.value)}
+                    placeholder="Filtrar cola por título o canal..."
+                    aria-label="Filtrar cola por título o canal"
+                    className={`w-full ${
+                      rightBtnScale === 'sm'
+                        ? 'min-h-[32px] text-xs'
+                        : 'min-h-[38px] text-xs sm:text-sm'
+                    } pl-8 ${
+                      queueSearch ? 'pr-20' : 'pr-3'
+                    } rounded-xl bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-amber-500 transition-colors`}
+                  />
+                  {queueSearch && (
+                    <div className="absolute right-2 flex items-center gap-1">
+                      <span className="text-[10px] font-mono-tabular text-slate-500 dark:text-slate-400 px-1">
+                        {filteredQueue.length}/{queue.length}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setQueueSearch('')}
+                        className="w-6 h-6 rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200/70 dark:hover:bg-white/10 flex items-center justify-center transition-colors cursor-pointer"
+                        title="Limpiar búsqueda"
+                        aria-label="Limpiar búsqueda"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
                     </div>
+                  )}
+                </div>
+              </div>
 
+              <div
+                ref={queueListRef}
+                className="flex-1 min-h-0 overflow-y-auto custom-scroll p-2.5 sm:p-4 space-y-1"
+              >
+                {filteredQueue.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center text-center text-slate-500 dark:text-slate-400 p-4">
+                    <Search className="w-7 h-7 text-slate-400 dark:text-slate-600 mb-2" />
+                    <p className="text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-300">
+                      No se encontraron pistas para &ldquo;{queueSearch}&rdquo;
+                    </p>
                     <button
-                      onClick={() => {
-                        setSelectedVideoKey(rowKey);
-                        playTrackAtIndex(idx, true);
-                      }}
-                      className="flex-1 min-w-0 flex items-center gap-2.5 text-left cursor-pointer"
+                      type="button"
+                      onClick={() => setQueueSearch('')}
+                      className="mt-2.5 px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-white/5 hover:bg-slate-200 dark:hover:bg-white/10 border border-slate-200 dark:border-white/10 text-xs font-medium text-amber-600 dark:text-amber-400 transition-colors cursor-pointer"
                     >
-                      <TrackArtwork
-                        src={track.thumbnailUrl}
-                        alt={track.title}
-                        isPlaying={isCurrent && isPlaying}
-                        className={rRowArtworkClass}
-                      />
-                      <div className="min-w-0 flex-1">
-                        <p
-                          className={`${
-                            rightBtnScale === 'sm' ? 'text-xs' : 'text-xs sm:text-sm'
-                          } font-medium truncate ${
-                            isCurrent ? 'text-amber-400 font-semibold' : 'text-slate-100'
-                          }`}
+                      Limpiar filtro
+                    </button>
+                  </div>
+                ) : (
+                  filteredQueue.map(({ track, realIdx }, visibleIdx) => {
+                    const isCurrent = realIdx === currentIndex;
+                    const rowKey = `queue-${track.videoId}-${realIdx}`;
+                    const isSelected = selectedVideoKey === rowKey;
+                    const isDraggingThis = draggingQueueIdx === realIdx;
+                    const isDragOverThis =
+                      dragOverQueueIdx === realIdx &&
+                      draggingQueueIdx !== null &&
+                      draggingQueueIdx !== realIdx;
+                    const savedPos = savedPositions[track.videoId] || 0;
+                    const isNewlyAdded = newlyQueuedVideoId === track.videoId;
+
+                    const prevTargetRealIdx =
+                      visibleIdx > 0 ? filteredQueue[visibleIdx - 1].realIdx : realIdx - 1;
+                    const nextTargetRealIdx =
+                      visibleIdx < filteredQueue.length - 1
+                        ? filteredQueue[visibleIdx + 1].realIdx
+                        : realIdx + 1;
+
+                    return (
+                      <div
+                        key={rowKey}
+                        data-queue-idx={realIdx}
+                        draggable
+                        style={{
+                          animationDelay: isNewlyAdded
+                            ? '0ms'
+                            : `${Math.min(visibleIdx * 22, 160)}ms`,
+                        }}
+                        onClick={() => setSelectedVideoKey(rowKey)}
+                        onDragStart={(e) => {
+                          activeDragIdxRef.current = realIdx;
+                          setDraggingQueueIdx(realIdx);
+                          setDragOverQueueIdx(realIdx);
+                          e.dataTransfer.effectAllowed = 'move';
+                          e.dataTransfer.setData('text/plain', String(realIdx));
+                        }}
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = 'move';
+                          if (dragOverQueueIdx !== realIdx) {
+                            setDragOverQueueIdx(realIdx);
+                          }
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          const fromIdx =
+                            activeDragIdxRef.current ??
+                            parseInt(e.dataTransfer.getData('text/plain'), 10);
+                          if (Number.isFinite(fromIdx) && fromIdx !== realIdx) {
+                            reorderQueueTrack(fromIdx, realIdx);
+                          }
+                          activeDragIdxRef.current = null;
+                          setDraggingQueueIdx(null);
+                          setDragOverQueueIdx(null);
+                        }}
+                        onDragEnd={() => {
+                          activeDragIdxRef.current = null;
+                          setDraggingQueueIdx(null);
+                          setDragOverQueueIdx(null);
+                        }}
+                        className={`${
+                          rightBtnScale === 'sm' ? 'py-1.5 px-2' : 'py-2 px-2.5'
+                        } ${
+                          isNewlyAdded ? 'queue-item-newly-added' : 'queue-item-slide-in'
+                        } rounded-xl flex items-center justify-between gap-2 transition-all select-none ${
+                          isDraggingThis
+                            ? 'bg-amber-500/20 ring-1 ring-amber-400/70 shadow-xl scale-[1.01] z-20 relative'
+                            : isDragOverThis
+                            ? 'bg-slate-100 dark:bg-white/[0.06] ring-1 ring-amber-400/50'
+                            : isCurrent
+                            ? 'bg-amber-500/12 dark:bg-amber-500/10 border border-amber-500/35 dark:border-amber-500/25'
+                            : isSelected
+                            ? 'bg-slate-100 dark:bg-white/[0.05] border border-amber-500/40 dark:border-amber-500/30'
+                            : 'hover:bg-slate-100/80 dark:hover:bg-white/[0.03] border border-transparent'
+                        }`}
+                      >
+                        {/* Tactile Drag Handle (Touch & Mouse) */}
+                        <div
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`Arrastrar para reordenar ${track.title}`}
+                          title="Arrastra para cambiar el orden en la cola"
+                          onTouchStart={(e) => {
+                            e.stopPropagation();
+                            setSelectedVideoKey(rowKey);
+                            handleStartQueueDrag(realIdx);
+                          }}
+                          onMouseDown={(e) => {
+                            if (e.button !== 0) return;
+                            e.stopPropagation();
+                            setSelectedVideoKey(rowKey);
+                            handleStartQueueDrag(realIdx);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'ArrowUp' && prevTargetRealIdx >= 0) {
+                              e.preventDefault();
+                              reorderQueueTrack(realIdx, prevTargetRealIdx);
+                            } else if (e.key === 'ArrowDown' && nextTargetRealIdx < queue.length) {
+                              e.preventDefault();
+                              reorderQueueTrack(realIdx, nextTargetRealIdx);
+                            }
+                          }}
+                          className={`${rIconBtnClass} touch-none cursor-grab active:cursor-grabbing text-slate-400 dark:text-slate-500 hover:text-amber-600 dark:hover:text-amber-400 active:text-amber-500 dark:active:text-amber-300 flex items-center justify-center shrink-0 transition-colors`}
                         >
-                          {track.title}
-                        </p>
-                        <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-400 truncate font-mono-tabular">
-                          <span className="font-sans truncate">{track.author}</span>
-                          <span aria-hidden="true">·</span>
-                          <span>{formatDuration(track.durationSeconds)}</span>
-                          {savedPos > 5 && (
-                            <>
+                          <GripVertical className="w-4 h-4" />
+                        </div>
+
+                        <button
+                          onClick={() => {
+                            setSelectedVideoKey(rowKey);
+                            playTrackAtIndex(realIdx, true);
+                          }}
+                          className="flex-1 min-w-0 flex items-center gap-2.5 text-left cursor-pointer"
+                        >
+                          <TrackArtwork
+                            src={track.thumbnailUrl}
+                            alt={track.title}
+                            isPlaying={isCurrent && isPlaying}
+                            className={rRowArtworkClass}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p
+                              className={`${
+                                rightBtnScale === 'sm' ? 'text-xs' : 'text-xs sm:text-sm'
+                              } font-medium truncate ${
+                                isCurrent
+                                  ? 'text-amber-600 dark:text-amber-400 font-semibold'
+                                  : 'text-slate-900 dark:text-slate-100'
+                              }`}
+                            >
+                              {track.title}
+                            </p>
+                            <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400 truncate font-mono-tabular">
+                              <span className="font-sans truncate">{track.author}</span>
                               <span aria-hidden="true">·</span>
-                              <span className="text-amber-300/90">
-                                {formatDuration(savedPos)}
-                              </span>
-                            </>
-                          )}
+                              <span>{formatDuration(track.durationSeconds)}</span>
+                              {savedPos > 5 && (
+                                <>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="text-amber-600 dark:text-amber-300/90">
+                                    {formatDuration(savedPos)}
+                                  </span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        </button>
+
+                        <div className="flex items-center gap-0.5 shrink-0">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedVideoKey(rowKey);
+                              reorderQueueTrack(realIdx, prevTargetRealIdx);
+                            }}
+                            disabled={visibleIdx === 0 || prevTargetRealIdx < 0}
+                            className={`${rIconBtnClass} text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200/70 dark:hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
+                            title="Subir vídeo"
+                            aria-label="Subir vídeo"
+                          >
+                            <ArrowUp className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedVideoKey(rowKey);
+                              reorderQueueTrack(realIdx, nextTargetRealIdx);
+                            }}
+                            disabled={
+                              visibleIdx === filteredQueue.length - 1 ||
+                              nextTargetRealIdx >= queue.length
+                            }
+                            className={`${rIconBtnClass} text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200/70 dark:hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
+                            title="Bajar vídeo"
+                            aria-label="Bajar vídeo"
+                          >
+                            <ArrowDown className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedVideoKey(rowKey);
+                              setModalTrackForPlaylist(track);
+                            }}
+                            className={`${rIconBtnClass} text-slate-500 dark:text-slate-400 hover:text-amber-600 dark:hover:text-amber-400 hover:bg-slate-200/70 dark:hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
+                            title="Añadir a lista"
+                            aria-label="Añadir a lista"
+                          >
+                            <BookmarkPlus className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removeQueueTrack(realIdx);
+                            }}
+                            className={`${rIconBtnClass} text-slate-500 dark:text-slate-400 hover:text-red-500 dark:hover:text-red-400 hover:bg-slate-200/70 dark:hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
+                            title="Eliminar de la cola"
+                            aria-label="Eliminar de la cola"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
                         </div>
                       </div>
-                    </button>
-
-                    <div className="flex items-center gap-0.5 shrink-0">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedVideoKey(rowKey);
-                          reorderQueueTrack(idx, idx - 1);
-                        }}
-                        disabled={idx === 0}
-                        className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
-                        title="Subir vídeo"
-                        aria-label="Subir vídeo"
-                      >
-                        <ArrowUp className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedVideoKey(rowKey);
-                          reorderQueueTrack(idx, idx + 1);
-                        }}
-                        disabled={idx === queue.length - 1}
-                        className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
-                        title="Bajar vídeo"
-                        aria-label="Bajar vídeo"
-                      >
-                        <ArrowDown className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedVideoKey(rowKey);
-                          setModalTrackForPlaylist(track);
-                        }}
-                        className={`${rIconBtnClass} text-slate-400 hover:text-amber-400 hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
-                        title="Añadir a lista"
-                        aria-label="Añadir a lista"
-                      >
-                        <BookmarkPlus className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          removeQueueTrack(idx);
-                        }}
-                        className={`${rIconBtnClass} text-slate-400 hover:text-red-400 hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
-                        title="Eliminar de la cola"
-                        aria-label="Eliminar de la cola"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
+                    );
+                  })
+                )}
+              </div>
             </div>
           )}
 
           {/* TAB 2: SUBSCRIBED CHANNELS & NEW EPISODES SINCE LAST CONNECTION */}
           {rightActiveTab === 'channels' && (
-            <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+            <div
+              key="tab-panel-channels"
+              className={`flex-1 min-h-0 flex flex-col overflow-hidden ${tabTransitionClass}`}
+            >
               {/* Top Subscribe Bar (by Channel Name, @handle, or URL) + Refresh Feed */}
               <div
                 className={`${
                   isMobileLandscape ? 'p-2 space-y-2' : 'p-3 sm:p-4 space-y-2.5'
-                } border-b border-white/[0.06] shrink-0`}
+                } border-b border-slate-200 dark:border-white/[0.06] shrink-0`}
               >
                 <form
                   onSubmit={(e) => {
@@ -2921,7 +3135,7 @@ export default function App() {
                   className="flex items-center gap-1.5"
                 >
                   <div className="relative flex-1 flex items-center">
-                    <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 pointer-events-none" />
+                    <Search className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500 absolute left-3 pointer-events-none" />
                     <input
                       type="text"
                       value={channelQuery}
@@ -2929,7 +3143,7 @@ export default function App() {
                       placeholder="Buscar canal, @handle o URL..."
                       className={`w-full ${
                         rightBtnScale === 'sm' ? 'min-h-[32px] text-xs' : 'min-h-[38px] text-xs sm:text-sm'
-                      } pl-8 pr-3 rounded-xl bg-[#090A0F] border border-white/10 text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500`}
+                      } pl-8 pr-3 rounded-xl bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-amber-500`}
                       disabled={isSubscribingChannel}
                     />
                   </div>
@@ -2949,13 +3163,13 @@ export default function App() {
                     type="button"
                     onClick={handleRefreshChannelsFeed}
                     disabled={isRefreshingFeed || subscriptions.length === 0}
-                    className={`${rIconBtnClass} bg-[#090A0F] border border-white/10 hover:border-amber-500/40 text-slate-300 hover:text-white flex items-center justify-center transition-colors disabled:opacity-40 cursor-pointer`}
+                    className={`${rIconBtnClass} bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 hover:border-amber-500/40 text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white flex items-center justify-center transition-colors disabled:opacity-40 cursor-pointer`}
                     title="Comprobar nuevos episodios en todos los canales"
                     aria-label="Actualizar feed de canales"
                   >
                     <RefreshCw
                       className={`w-3.5 h-3.5 ${
-                        isRefreshingFeed ? 'animate-spin text-amber-400' : ''
+                        isRefreshingFeed ? 'animate-spin text-amber-600 dark:text-amber-400' : ''
                       }`}
                     />
                   </button>
@@ -2969,7 +3183,7 @@ export default function App() {
                       className={`${rActionBtnClass} font-medium flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                         selectedChannelFilter === 'all'
                           ? 'bg-amber-500 text-slate-950 font-semibold'
-                          : 'bg-[#090A0F] border border-white/10 text-slate-300 hover:text-white'
+                          : 'bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
                       }`}
                     >
                       <span>Todos</span>
@@ -2988,14 +3202,14 @@ export default function App() {
                           className={`${rActionBtnClass} font-medium flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                             isSelected
                               ? 'bg-amber-500 text-slate-950 font-semibold'
-                              : 'bg-[#090A0F] border border-white/10 text-slate-300 hover:text-white'
+                              : 'bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
                           }`}
                         >
                           <span>{ch.name}</span>
                           {chNewCount > 0 && (
                             <span
                               className={`font-mono-tabular font-semibold ${
-                                isSelected ? 'text-slate-950' : 'text-amber-400'
+                                isSelected ? 'text-slate-950' : 'text-amber-600 dark:text-amber-400'
                               }`}
                             >
                               ({chNewCount})
@@ -3010,24 +3224,24 @@ export default function App() {
 
               {/* Active Channel Header if a specific channel is filtered */}
               {selectedChannelFilter !== 'all' && (
-                <div className="px-3 py-1.5 bg-[#090A0F]/60 border-b border-white/[0.05] flex items-center justify-between gap-2 shrink-0">
+                <div className="px-3 py-1.5 bg-slate-50 dark:bg-[#090A0F]/60 border-b border-slate-200 dark:border-white/[0.05] flex items-center justify-between gap-2 shrink-0">
                   {(() => {
                     const ch = subscriptions.find((c) => c.channelId === selectedChannelFilter);
                     if (!ch) return null;
                     return (
                       <>
-                        <div className="min-w-0 flex items-center gap-1.5 text-xs text-slate-300">
-                          <span className="font-semibold text-white truncate">{ch.name}</span>
+                        <div className="min-w-0 flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
+                          <span className="font-semibold text-slate-900 dark:text-white truncate">{ch.name}</span>
                           <span aria-hidden="true">·</span>
-                          <span className="text-slate-400 truncate">{ch.handle}</span>
+                          <span className="text-slate-500 dark:text-slate-400 truncate">{ch.handle}</span>
                           <span aria-hidden="true">·</span>
-                          <span className="font-mono-tabular text-slate-400">
+                          <span className="font-mono-tabular text-slate-500 dark:text-slate-400">
                             {ch.episodes.length} ep.
                           </span>
                         </div>
                         <button
                           onClick={() => handleUnsubscribeChannel(ch.channelId, ch.name)}
-                          className={`${rActionBtnClass} text-slate-400 hover:text-red-400 hover:bg-white/5 flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
+                          className={`${rActionBtnClass} text-slate-500 dark:text-slate-400 hover:text-red-500 dark:hover:text-red-400 hover:bg-slate-100 dark:hover:bg-white/5 flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                           <span>Dejar</span>
@@ -3039,11 +3253,11 @@ export default function App() {
               )}
 
               {/* Unified Chronological Episodes Feed */}
-              <div className="flex-1 min-h-0 overflow-y-auto custom-scroll p-2.5 sm:p-4 divide-y divide-white/[0.05]">
+              <div className="flex-1 min-h-0 overflow-y-auto custom-scroll p-2.5 sm:p-4 divide-y divide-slate-100 dark:divide-white/[0.05]">
                 {displayedChannelEpisodes.length === 0 ? (
-                  <div className="h-full flex flex-col items-center justify-center text-center text-slate-400 p-4">
-                    <Radio className="w-8 h-8 text-slate-600 mb-2" />
-                    <p className="text-xs sm:text-sm font-medium text-slate-300">
+                  <div className="h-full flex flex-col items-center justify-center text-center text-slate-500 dark:text-slate-400 p-4">
+                    <Radio className="w-8 h-8 text-slate-400 dark:text-slate-600 mb-2" />
+                    <p className="text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-300">
                       Sin canales suscritos todavía
                     </p>
                   </div>
@@ -3079,10 +3293,10 @@ export default function App() {
                           rightBtnScale === 'sm' ? 'py-1.5 px-2' : 'py-2 px-2.5'
                         } rounded-xl flex items-center justify-between gap-2 transition-colors ${
                           isSelected
-                            ? 'bg-white/[0.06] border border-amber-500/30'
+                            ? 'bg-slate-100 dark:bg-white/[0.06] border border-amber-500/40 dark:border-amber-500/30'
                             : isNew
-                            ? 'bg-amber-500/[0.06] hover:bg-amber-500/[0.1] border border-transparent'
-                            : 'hover:bg-white/[0.03] border border-transparent'
+                            ? 'bg-amber-500/[0.08] dark:bg-amber-500/[0.06] hover:bg-amber-500/[0.14] dark:hover:bg-amber-500/[0.1] border border-transparent'
+                            : 'hover:bg-slate-100/80 dark:hover:bg-white/[0.03] border border-transparent'
                         }`}
                       >
                         <button
@@ -3104,25 +3318,25 @@ export default function App() {
                                 rightBtnScale === 'sm' ? 'text-xs' : 'text-xs sm:text-sm'
                               } truncate ${
                                 isNew
-                                  ? 'font-semibold text-white'
-                                  : 'font-medium text-slate-200'
+                                  ? 'font-semibold text-slate-900 dark:text-white'
+                                  : 'font-medium text-slate-800 dark:text-slate-200'
                               }`}
                             >
                               {ep.title}
                             </p>
                             {/* Zero-Pill Metadata with clean unboxed NUEVO indicator */}
-                            <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-400 truncate font-mono-tabular">
+                            <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400 truncate font-mono-tabular">
                               {isNew && (
                                 <>
-                                  <span className="font-sans font-bold text-amber-400 tracking-wide">
+                                  <span className="font-sans font-bold text-amber-600 dark:text-amber-400 tracking-wide">
                                     NUEVO
                                   </span>
-                                  <span aria-hidden="true" className="text-amber-400">
+                                  <span aria-hidden="true" className="text-amber-600 dark:text-amber-400">
                                     ·
                                   </span>
                                 </>
                               )}
-                              <span className="font-sans text-slate-300 truncate">
+                              <span className="font-sans text-slate-700 dark:text-slate-300 truncate">
                                 {ep.channelName}
                               </span>
                               <span aria-hidden="true">·</span>
@@ -3142,7 +3356,7 @@ export default function App() {
                               handleReorderChannelEpisode(idx, idx - 1);
                             }}
                             disabled={idx === 0}
-                            className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
+                            className={`${rIconBtnClass} text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200/70 dark:hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
                             title="Subir vídeo"
                             aria-label="Subir vídeo"
                           >
@@ -3155,7 +3369,7 @@ export default function App() {
                               handleReorderChannelEpisode(idx, idx + 1);
                             }}
                             disabled={idx === displayedChannelEpisodes.length - 1}
-                            className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
+                            className={`${rIconBtnClass} text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200/70 dark:hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
                             title="Bajar vídeo"
                             aria-label="Bajar vídeo"
                           >
@@ -3172,15 +3386,16 @@ export default function App() {
                                   notify('El episodio ya está en la cola');
                                   return prev;
                                 }
+                                triggerQueueItemSlideIn(ep.videoId, true);
                                 notify(`Añadido a la cola: ${ep.title}`);
                                 return [...prev, ep];
                               });
                             }}
-                            className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
+                            className={`${rIconBtnClass} text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200/70 dark:hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
                             title="Añadir episodio a la cola"
                             aria-label="Añadir episodio a la cola"
                           >
-                            <Plus className="w-3.5 h-3.5 text-amber-400" />
+                            <Plus className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
                           </button>
 
                           <button
@@ -3189,7 +3404,7 @@ export default function App() {
                               setSelectedVideoKey(rowKey);
                               setModalTrackForPlaylist(ep);
                             }}
-                            className={`${rIconBtnClass} text-slate-400 hover:text-amber-400 hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
+                            className={`${rIconBtnClass} text-slate-500 dark:text-slate-400 hover:text-amber-600 dark:hover:text-amber-400 hover:bg-slate-200/70 dark:hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
                             title="Guardar episodio en lista"
                             aria-label="Guardar episodio en lista"
                           >
@@ -3201,7 +3416,7 @@ export default function App() {
                               e.stopPropagation();
                               handleDeleteChannelEpisode(ep.channelId, ep.videoId);
                             }}
-                            className={`${rIconBtnClass} text-slate-400 hover:text-red-400 hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
+                            className={`${rIconBtnClass} text-slate-500 dark:text-slate-400 hover:text-red-500 dark:hover:text-red-400 hover:bg-slate-200/70 dark:hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
                             title="Eliminar vídeo del canal"
                             aria-label="Eliminar vídeo del canal"
                           >
@@ -3218,11 +3433,14 @@ export default function App() {
 
           {/* TAB 3: CUSTOM PLAYLISTS & GOOGLE DRIVE SYNC */}
           {rightActiveTab === 'playlists' && (
-            <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+            <div
+              key="tab-panel-playlists"
+              className={`flex-1 min-h-0 flex flex-col overflow-hidden ${tabTransitionClass}`}
+            >
               <div
                 className={`${
                   isMobileLandscape ? 'p-2 space-y-1.5' : 'p-3 sm:p-4 space-y-2.5'
-                } border-b border-white/[0.06] shrink-0`}
+                } border-b border-slate-200 dark:border-white/[0.06] shrink-0`}
               >
                 <GoogleDriveSyncBar
                   playlists={playlists}
@@ -3244,7 +3462,7 @@ export default function App() {
                     placeholder="Nueva lista de reproducción..."
                     className={`flex-1 ${
                       rightBtnScale === 'sm' ? 'min-h-[30px] text-xs' : 'min-h-[36px] text-xs sm:text-sm'
-                    } px-3 rounded-xl bg-[#090A0F] border border-white/10 text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500`}
+                    } px-3 rounded-xl bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-amber-500`}
                   />
                   <button
                     type="submit"
@@ -3267,7 +3485,7 @@ export default function App() {
                           className={`${rActionBtnClass} font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                             isSelected
                               ? 'bg-amber-500 text-slate-950 font-semibold'
-                              : 'bg-[#090A0F] border border-white/10 text-slate-300 hover:text-white'
+                              : 'bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
                           }`}
                         >
                           <span>{pl.name}</span>
@@ -3281,20 +3499,20 @@ export default function App() {
 
               <div className="flex-1 min-h-0 overflow-y-auto custom-scroll p-2.5 sm:p-4">
                 {!activePlaylist ? (
-                  <div className="h-full flex flex-col items-center justify-center text-center text-slate-400 p-4">
-                    <ListMusic className="w-8 h-8 text-slate-600 mb-2" />
-                    <p className="text-xs sm:text-sm font-medium text-slate-300">
+                  <div className="h-full flex flex-col items-center justify-center text-center text-slate-500 dark:text-slate-400 p-4">
+                    <ListMusic className="w-8 h-8 text-slate-400 dark:text-slate-600 mb-2" />
+                    <p className="text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-300">
                       No tienes listas creadas
                     </p>
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    <div className="flex items-center justify-between gap-2 pb-2 border-b border-white/[0.06]">
+                    <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-200 dark:border-white/[0.06]">
                       <div className="min-w-0">
-                        <h3 className="text-xs sm:text-sm font-semibold font-display text-white truncate">
+                        <h3 className="text-xs sm:text-sm font-semibold font-display text-slate-900 dark:text-white truncate">
                           {activePlaylist.name}
                         </h3>
-                        <p className="text-[11px] text-slate-400 font-mono-tabular">
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono-tabular">
                           {activePlaylist.tracks.length}{' '}
                           {activePlaylist.tracks.length === 1 ? 'pista' : 'pistas'}
                         </p>
@@ -3305,10 +3523,10 @@ export default function App() {
                             onClick={() =>
                               handleAddTrackToPlaylist(activePlaylist.id, currentTrack)
                             }
-                            className={`${rActionBtnClass} bg-[#090A0F] border border-white/10 hover:border-amber-500/40 font-medium text-slate-200 flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
+                            className={`${rActionBtnClass} bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 hover:border-amber-500/40 font-medium text-slate-700 dark:text-slate-200 flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
                             title="Añadir la pista que está sonando a esta lista"
                           >
-                            <Plus className="w-3.5 h-3.5 text-amber-400" />
+                            <Plus className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
                             <span>+ Actual</span>
                           </button>
                         )}
@@ -3322,7 +3540,7 @@ export default function App() {
                         </button>
                         <button
                           onClick={() => handleDeletePlaylist(activePlaylist.id)}
-                          className={`${rIconBtnClass} bg-[#090A0F] border border-white/10 hover:border-red-500/40 text-slate-400 hover:text-red-400 flex items-center justify-center transition-colors cursor-pointer`}
+                          className={`${rIconBtnClass} bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 hover:border-red-500/40 text-slate-500 dark:text-slate-400 hover:text-red-500 dark:hover:text-red-400 flex items-center justify-center transition-colors cursor-pointer`}
                           title="Eliminar lista"
                           aria-label="Eliminar lista"
                         >
@@ -3332,13 +3550,13 @@ export default function App() {
                     </div>
 
                     {activePlaylist.tracks.length === 0 ? (
-                      <div className="py-6 text-center text-slate-400">
+                      <div className="py-6 text-center text-slate-500 dark:text-slate-400">
                         <p className="text-xs">
                           Lista vacía. Pulsa &ldquo;+ Actual&rdquo; para guardar la pista en reproducción.
                         </p>
                       </div>
                     ) : (
-                      <div className="divide-y divide-white/[0.05]">
+                      <div className="divide-y divide-slate-100 dark:divide-white/[0.05]">
                         {activePlaylist.tracks.map((track, idx) => {
                           const rowKey = `pl-${activePlaylist.id}-${track.videoId}-${idx}`;
                           const isSelected = selectedVideoKey === rowKey;
@@ -3366,8 +3584,8 @@ export default function App() {
                                 rightBtnScale === 'sm' ? 'py-1.5 px-1.5' : 'py-2 px-2'
                               } flex items-center justify-between gap-2 rounded-xl transition-colors ${
                                 isSelected
-                                  ? 'bg-white/[0.06] border border-amber-500/30'
-                                  : 'hover:bg-white/[0.03] border border-transparent'
+                                  ? 'bg-slate-100 dark:bg-white/[0.06] border border-amber-500/40 dark:border-amber-500/30'
+                                  : 'hover:bg-slate-100/80 dark:hover:bg-white/[0.03] border border-transparent'
                               }`}
                             >
                               <button
@@ -3386,11 +3604,11 @@ export default function App() {
                                   <p
                                     className={`${
                                       rightBtnScale === 'sm' ? 'text-xs' : 'text-xs sm:text-sm'
-                                    } font-medium text-slate-100 truncate`}
+                                    } font-medium text-slate-900 dark:text-slate-100 truncate`}
                                   >
                                     {track.title}
                                   </p>
-                                  <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-400 font-mono-tabular">
+                                  <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400 font-mono-tabular">
                                     <span className="font-sans truncate">{track.author}</span>
                                     <span aria-hidden="true">·</span>
                                     <span>{formatDuration(track.durationSeconds)}</span>
@@ -3406,7 +3624,7 @@ export default function App() {
                                     handleReorderPlaylistTrack(activePlaylist.id, idx, idx - 1);
                                   }}
                                   disabled={idx === 0}
-                                  className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
+                                  className={`${rIconBtnClass} text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200/70 dark:hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
                                   title="Subir vídeo en la lista"
                                   aria-label="Subir vídeo en la lista"
                                 >
@@ -3419,7 +3637,7 @@ export default function App() {
                                     handleReorderPlaylistTrack(activePlaylist.id, idx, idx + 1);
                                   }}
                                   disabled={idx === activePlaylist.tracks.length - 1}
-                                  className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
+                                  className={`${rIconBtnClass} text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200/70 dark:hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
                                   title="Bajar vídeo en la lista"
                                   aria-label="Bajar vídeo en la lista"
                                 >
@@ -3434,22 +3652,23 @@ export default function App() {
                                         notify('El vídeo ya está en la cola');
                                         return prev;
                                       }
+                                      triggerQueueItemSlideIn(track.videoId, true);
                                       notify(`Añadido a la cola: ${track.title}`);
                                       return [...prev, track];
                                     });
                                   }}
-                                  className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
+                                  className={`${rIconBtnClass} text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200/70 dark:hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
                                   title="Añadir a la cola"
                                   aria-label="Añadir a la cola"
                                 >
-                                  <Plus className="w-3.5 h-3.5 text-amber-400" />
+                                  <Plus className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
                                 </button>
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     handleRemoveTrackFromPlaylist(activePlaylist.id, track.videoId);
                                   }}
-                                  className={`${rIconBtnClass} text-slate-400 hover:text-red-400 hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
+                                  className={`${rIconBtnClass} text-slate-500 dark:text-slate-400 hover:text-red-500 dark:hover:text-red-400 hover:bg-slate-200/70 dark:hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
                                   title="Eliminar de la lista"
                                   aria-label="Eliminar de la lista"
                                 >
@@ -3469,14 +3688,24 @@ export default function App() {
 
           {/* TAB 4: LISTENING HISTORY */}
           {rightActiveTab === 'history' && (
-            <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+            <div
+              key="tab-panel-history"
+              className={`flex-1 min-h-0 flex flex-col overflow-hidden ${tabTransitionClass}`}
+            >
+              {/* Daily Listening Hours BarChart (Recharts - Last 7 Days) */}
+              <ListeningHistoryChart
+                dailyListeningSeconds={dailyListeningSeconds}
+                history={history}
+                compact={isMobileLandscape}
+              />
+
               <div
                 className={`${
                   isMobileLandscape ? 'p-2' : 'p-3 sm:p-4'
-                } border-b border-white/[0.06] shrink-0`}
+                } border-b border-slate-200 dark:border-white/[0.06] shrink-0`}
               >
                 <div className="relative flex items-center">
-                  <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 pointer-events-none" />
+                  <Search className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500 absolute left-3 pointer-events-none" />
                   <input
                     type="text"
                     value={historySearch}
@@ -3484,16 +3713,16 @@ export default function App() {
                     placeholder="Filtrar historial por título o canal..."
                     className={`w-full ${
                       rightBtnScale === 'sm' ? 'min-h-[32px] text-xs' : 'min-h-[38px] text-xs sm:text-sm'
-                    } pl-8 pr-3 rounded-xl bg-[#090A0F] border border-white/10 text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500`}
+                    } pl-8 pr-3 rounded-xl bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-amber-500`}
                   />
                 </div>
               </div>
 
-              <div className="flex-1 min-h-0 overflow-y-auto custom-scroll p-2.5 sm:p-4 divide-y divide-white/[0.05]">
+              <div className="flex-1 min-h-0 overflow-y-auto custom-scroll p-2.5 sm:p-4 divide-y divide-slate-100 dark:divide-white/[0.05]">
                 {filteredHistory.length === 0 ? (
-                  <div className="h-full flex flex-col items-center justify-center text-center text-slate-400 p-4">
-                    <History className="w-8 h-8 text-slate-600 mb-2" />
-                    <p className="text-xs sm:text-sm font-medium text-slate-300">
+                  <div className="h-full flex flex-col items-center justify-center text-center text-slate-500 dark:text-slate-400 p-4">
+                    <History className="w-8 h-8 text-slate-400 dark:text-slate-600 mb-2" />
+                    <p className="text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-300">
                       Sin historial de escucha
                     </p>
                   </div>
@@ -3527,8 +3756,8 @@ export default function App() {
                           rightBtnScale === 'sm' ? 'py-1.5 px-1.5' : 'py-2 px-2'
                         } flex items-center justify-between gap-2 rounded-xl transition-colors ${
                           isSelected
-                            ? 'bg-white/[0.06] border border-amber-500/30'
-                            : 'hover:bg-white/[0.03] border border-transparent'
+                            ? 'bg-slate-100 dark:bg-white/[0.06] border border-amber-500/40 dark:border-amber-500/30'
+                            : 'hover:bg-slate-100/80 dark:hover:bg-white/[0.03] border border-transparent'
                         }`}
                       >
                         <button
@@ -3548,18 +3777,18 @@ export default function App() {
                             <p
                               className={`${
                                 rightBtnScale === 'sm' ? 'text-xs' : 'text-xs sm:text-sm'
-                              } font-medium text-slate-100 truncate`}
+                              } font-medium text-slate-900 dark:text-slate-100 truncate`}
                             >
                               {item.track.title}
                             </p>
-                            <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-400 font-mono-tabular truncate">
+                            <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400 font-mono-tabular truncate">
                               <span className="font-sans truncate">{item.track.author}</span>
                               <span aria-hidden="true">·</span>
                               <span className="font-sans">{formatRelativeTime(item.playedAt)}</span>
                               {resumeSec > 5 && (
                                 <>
                                   <span aria-hidden="true">·</span>
-                                  <span className="text-amber-400">
+                                  <span className="text-amber-600 dark:text-amber-400">
                                     En {formatDuration(resumeSec)}
                                   </span>
                                 </>
@@ -3576,7 +3805,7 @@ export default function App() {
                               handleReorderHistoryItem(idx, idx - 1);
                             }}
                             disabled={idx === 0}
-                            className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
+                            className={`${rIconBtnClass} text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200/70 dark:hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
                             title="Subir en el historial"
                             aria-label="Subir en el historial"
                           >
@@ -3589,7 +3818,7 @@ export default function App() {
                               handleReorderHistoryItem(idx, idx + 1);
                             }}
                             disabled={idx === filteredHistory.length - 1}
-                            className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
+                            className={`${rIconBtnClass} text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200/70 dark:hover:bg-white/5 disabled:opacity-25 flex items-center justify-center transition-colors cursor-pointer`}
                             title="Bajar en el historial"
                             aria-label="Bajar en el historial"
                           >
@@ -3604,15 +3833,16 @@ export default function App() {
                                   notify('El vídeo ya está en la cola');
                                   return prev;
                                 }
+                                triggerQueueItemSlideIn(item.track.videoId, true);
                                 notify(`Añadido a la cola: ${item.track.title}`);
                                 return [...prev, item.track];
                               });
                             }}
-                            className={`${rIconBtnClass} text-slate-400 hover:text-white hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
+                            className={`${rIconBtnClass} text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200/70 dark:hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
                             title="Añadir a la cola"
                             aria-label="Añadir a la cola"
                           >
-                            <Plus className="w-3.5 h-3.5 text-amber-400" />
+                            <Plus className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
                           </button>
                           <button
                             onClick={(e) => {
@@ -3620,7 +3850,7 @@ export default function App() {
                               setSelectedVideoKey(rowKey);
                               setModalTrackForPlaylist(item.track);
                             }}
-                            className={`${rIconBtnClass} text-slate-400 hover:text-amber-400 hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
+                            className={`${rIconBtnClass} text-slate-500 dark:text-slate-400 hover:text-amber-600 dark:hover:text-amber-400 hover:bg-slate-200/70 dark:hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
                             title="Guardar en lista"
                             aria-label="Guardar en lista"
                           >
@@ -3631,7 +3861,7 @@ export default function App() {
                               e.stopPropagation();
                               handleDeleteHistoryItem(item.id);
                             }}
-                            className={`${rIconBtnClass} text-slate-400 hover:text-red-400 hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
+                            className={`${rIconBtnClass} text-slate-500 dark:text-slate-400 hover:text-red-500 dark:hover:text-red-400 hover:bg-slate-200/70 dark:hover:bg-white/5 flex items-center justify-center transition-colors cursor-pointer`}
                             title="Eliminar del historial"
                             aria-label="Eliminar del historial"
                           >
@@ -3650,7 +3880,7 @@ export default function App() {
 
       {/* Mobile Portrait Mini-Player Bar (Hidden in Mobile Landscape & Desktop) */}
       {!isSplitLayout && activeTab !== 'player' && currentTrack && (
-        <div className="px-3 py-2 bg-[#12151E] border-t border-white/10 flex items-center justify-between gap-3 shrink-0">
+        <div className="px-3 py-2 bg-white dark:bg-[#12151E] border-t border-slate-200 dark:border-white/10 flex items-center justify-between gap-3 shrink-0 transition-colors">
           <button
             onClick={() => setActiveTab('player')}
             className="flex-1 min-w-0 flex items-center gap-2.5 text-left cursor-pointer"
@@ -3662,8 +3892,8 @@ export default function App() {
               className="w-10 h-10 rounded-lg"
             />
             <div className="min-w-0 flex-1">
-              <p className="text-xs font-semibold text-white truncate">{currentTrack.title}</p>
-              <p className="text-[11px] text-slate-400 truncate font-mono-tabular">
+              <p className="text-xs font-semibold text-slate-900 dark:text-white truncate">{currentTrack.title}</p>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate font-mono-tabular">
                 {currentTrack.author} · {formatDuration(currentTime)}
               </p>
             </div>
@@ -3682,7 +3912,7 @@ export default function App() {
             </button>
             <button
               onClick={handleNextTrack}
-              className="min-h-[44px] min-w-[44px] rounded-xl text-slate-300 hover:text-white flex items-center justify-center cursor-pointer"
+              className="min-h-[44px] min-w-[44px] rounded-xl text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white flex items-center justify-center cursor-pointer"
               aria-label="Siguiente pista"
             >
               <SkipForward className="w-5 h-5" />
@@ -3693,77 +3923,154 @@ export default function App() {
 
       {/* Unified Bottom Selection Bar: Audio, Cola, Canales, Listas e Historial */}
       <nav
-        className={`${
+        className={`relative ${
           isMobileLandscape ? 'h-11' : 'h-14'
-        } bg-[#090A0F]/95 backdrop-blur-md border-t border-white/[0.08] grid grid-cols-5 items-center shrink-0 z-30`}
+        } bg-white/95 dark:bg-[#090A0F]/95 backdrop-blur-md border-t border-slate-200 dark:border-white/[0.08] grid grid-cols-5 items-center shrink-0 z-30 overflow-hidden transition-colors duration-300`}
         aria-label="Navegación principal"
       >
+        {/* Sliding Horizontal Amber Top Bar & Illuminated Capsule Covering Full Proportional Section */}
+        <div
+          aria-hidden="true"
+          className="nav-sliding-carrier absolute inset-y-0 left-0 w-1/5 pointer-events-none"
+          style={{
+            transform: `translate3d(${
+              (['player', 'queue', 'channels', 'playlists', 'history'] as const).indexOf(
+                activeTab
+              ) * 100
+            }%, 0, 0)`,
+          }}
+        >
+          {/* Glowing Top Accent Line (100% proportional width edge-to-edge) */}
+          <span className="absolute top-0 inset-x-0 w-full h-[2.5px] bg-amber-500 dark:bg-amber-400 shadow-[0_0_12px_rgba(245,158,11,0.9)]" />
+          {/* Illuminated Amber Capsule Covering Full Proportional Section (Icon + Text) */}
+          <span className="absolute inset-x-1 inset-y-1 rounded-xl bg-amber-500/18 dark:bg-amber-500/15 border border-amber-500/35 dark:border-amber-400/30 shadow-[0_0_18px_rgba(245,158,11,0.18)] transition-all duration-200" />
+        </div>
+
         <button
           onClick={() => setActiveTab('player')}
-          className={`h-full flex flex-col items-center justify-center transition-colors cursor-pointer ${
-            activeTab === 'player' ? 'text-amber-400' : 'text-slate-400 hover:text-slate-200'
+          className={`relative z-10 h-full flex flex-col items-center justify-center transition-colors duration-200 cursor-pointer ${
+            activeTab === 'player'
+              ? 'text-amber-600 dark:text-amber-400'
+              : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
           }`}
         >
-          <Disc3 className="w-5 h-5" />
-          <span className="text-[10px] font-medium tracking-tight mt-0.5 whitespace-nowrap">
+          <div className={activeTab === 'player' ? 'nav-icon-active' : 'nav-icon-inactive'}>
+            <Disc3 className="w-5 h-5" />
+          </div>
+          <span
+            className={`text-[10px] tracking-tight mt-0.5 whitespace-nowrap transition-all duration-200 ${
+              activeTab === 'player'
+                ? 'font-semibold text-amber-700 dark:text-amber-300'
+                : 'font-medium'
+            }`}
+          >
             Audio
           </span>
         </button>
 
         <button
           onClick={() => setActiveTab('queue')}
-          className={`h-full flex flex-col items-center justify-center transition-colors cursor-pointer ${
-            (isSplitLayout ? rightActiveTab === 'queue' : activeTab === 'queue')
-              ? 'text-amber-400'
-              : 'text-slate-400 hover:text-slate-200'
+          className={`relative z-10 h-full flex flex-col items-center justify-center transition-colors duration-200 cursor-pointer ${
+            activeTab === 'queue'
+              ? 'text-amber-600 dark:text-amber-400'
+              : isSplitLayout && rightActiveTab === 'queue'
+              ? 'text-amber-600/80 dark:text-amber-300/80'
+              : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
           }`}
         >
-          <ListMusic className="w-5 h-5" />
-          <span className="text-[10px] font-medium tracking-tight mt-0.5 whitespace-nowrap">
+          <div className={activeTab === 'queue' ? 'nav-icon-active' : 'nav-icon-inactive'}>
+            <ListMusic className="w-5 h-5" />
+          </div>
+          <span
+            className={`text-[10px] tracking-tight mt-0.5 whitespace-nowrap transition-all duration-200 ${
+              activeTab === 'queue'
+                ? 'font-semibold text-amber-700 dark:text-amber-300'
+                : 'font-medium'
+            }`}
+          >
             Cola ({queue.length})
           </span>
         </button>
 
         <button
           onClick={() => setActiveTab('channels')}
-          className={`h-full flex flex-col items-center justify-center transition-colors cursor-pointer ${
-            (isSplitLayout ? rightActiveTab === 'channels' : activeTab === 'channels')
-              ? 'text-amber-400'
+          className={`relative z-10 h-full flex flex-col items-center justify-center transition-colors duration-200 cursor-pointer ${
+            activeTab === 'channels'
+              ? 'text-amber-600 dark:text-amber-400'
               : newCountByChannel.total > 0
-              ? 'text-amber-300'
-              : 'text-slate-400 hover:text-slate-200'
+              ? 'text-amber-600 dark:text-amber-300'
+              : isSplitLayout && rightActiveTab === 'channels'
+              ? 'text-amber-600/80 dark:text-amber-300/80'
+              : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
           }`}
         >
-          <Radio className="w-5 h-5" />
-          <span className="text-[10px] font-medium tracking-tight mt-0.5 whitespace-nowrap">
-            Canales {newCountByChannel.total > 0 ? `(${newCountByChannel.total})` : ''}
+          <div
+            className={`relative inline-flex items-center justify-center ${
+              activeTab === 'channels' ? 'nav-icon-active' : 'nav-icon-inactive'
+            }`}
+          >
+            <Radio className="w-5 h-5" />
+            {newCountByChannel.total > 0 && (
+              <div className="absolute -top-1.5 -right-2.5 min-w-[16px] h-4 px-1 rounded-full bg-amber-500 text-slate-950 text-[9px] font-bold leading-none tabular-nums flex items-center justify-center ring-2 ring-white dark:ring-[#0E1017] shadow-sm pointer-events-none">
+                {newCountByChannel.total}
+              </div>
+            )}
+          </div>
+          <span
+            className={`text-[10px] tracking-tight mt-0.5 whitespace-nowrap transition-all duration-200 ${
+              activeTab === 'channels'
+                ? 'font-semibold text-amber-700 dark:text-amber-300'
+                : 'font-medium'
+            }`}
+          >
+            Canales
           </span>
         </button>
 
         <button
           onClick={() => setActiveTab('playlists')}
-          className={`h-full flex flex-col items-center justify-center transition-colors cursor-pointer ${
-            (isSplitLayout ? rightActiveTab === 'playlists' : activeTab === 'playlists')
-              ? 'text-amber-400'
-              : 'text-slate-400 hover:text-slate-200'
+          className={`relative z-10 h-full flex flex-col items-center justify-center transition-colors duration-200 cursor-pointer ${
+            activeTab === 'playlists'
+              ? 'text-amber-600 dark:text-amber-400'
+              : isSplitLayout && rightActiveTab === 'playlists'
+              ? 'text-amber-600/80 dark:text-amber-300/80'
+              : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
           }`}
         >
-          <FolderPlus className="w-5 h-5" />
-          <span className="text-[10px] font-medium tracking-tight mt-0.5 whitespace-nowrap">
+          <div className={activeTab === 'playlists' ? 'nav-icon-active' : 'nav-icon-inactive'}>
+            <FolderPlus className="w-5 h-5" />
+          </div>
+          <span
+            className={`text-[10px] tracking-tight mt-0.5 whitespace-nowrap transition-all duration-200 ${
+              activeTab === 'playlists'
+                ? 'font-semibold text-amber-700 dark:text-amber-300'
+                : 'font-medium'
+            }`}
+          >
             Listas
           </span>
         </button>
 
         <button
           onClick={() => setActiveTab('history')}
-          className={`h-full flex flex-col items-center justify-center transition-colors cursor-pointer ${
-            (isSplitLayout ? rightActiveTab === 'history' : activeTab === 'history')
-              ? 'text-amber-400'
-              : 'text-slate-400 hover:text-slate-200'
+          className={`relative z-10 h-full flex flex-col items-center justify-center transition-colors duration-200 cursor-pointer ${
+            activeTab === 'history'
+              ? 'text-amber-600 dark:text-amber-400'
+              : isSplitLayout && rightActiveTab === 'history'
+              ? 'text-amber-600/80 dark:text-amber-300/80'
+              : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
           }`}
         >
-          <History className="w-5 h-5" />
-          <span className="text-[10px] font-medium tracking-tight mt-0.5 whitespace-nowrap">
+          <div className={activeTab === 'history' ? 'nav-icon-active' : 'nav-icon-inactive'}>
+            <History className="w-5 h-5" />
+          </div>
+          <span
+            className={`text-[10px] tracking-tight mt-0.5 whitespace-nowrap transition-all duration-200 ${
+              activeTab === 'history'
+                ? 'font-semibold text-amber-700 dark:text-amber-300'
+                : 'font-medium'
+            }`}
+          >
             Historial
           </span>
         </button>

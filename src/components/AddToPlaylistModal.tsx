@@ -34,23 +34,23 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-2.5 sm:p-4 overflow-y-auto"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 dark:bg-black/80 backdrop-blur-sm p-2.5 sm:p-4 overflow-y-auto"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md max-h-[92dvh] overflow-y-auto custom-scroll rounded-2xl bg-[#12151E] border border-white/15 p-4 sm:p-5 shadow-2xl text-slate-100 my-auto"
+        className="w-full max-w-md max-h-[92dvh] overflow-y-auto custom-scroll rounded-2xl bg-white dark:bg-[#12151E] border border-slate-200 dark:border-white/15 p-4 sm:p-5 shadow-2xl text-slate-900 dark:text-slate-100 my-auto"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between pb-3 border-b border-white/10">
+        <div className="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-white/10">
           <div className="min-w-0 pr-2">
             <h3 className="text-base font-semibold font-display truncate">
               Guardar en lista de reproducción
             </h3>
-            <p className="text-xs text-slate-400 truncate mt-0.5">{track.title}</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400 truncate mt-0.5">{track.title}</p>
           </div>
           <button
             onClick={onClose}
-            className="min-h-[44px] min-w-[44px] -mr-2 flex items-center justify-center text-slate-400 hover:text-white cursor-pointer"
+            className="min-h-[44px] min-w-[44px] -mr-2 flex items-center justify-center text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white cursor-pointer"
             aria-label="Cerrar"
           >
             <X className="w-5 h-5" />
@@ -58,7 +58,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
         </div>
 
         {playlists.length > 0 && (
-          <div className="mt-3 max-h-48 overflow-y-auto custom-scroll divide-y divide-white/5">
+          <div className="mt-3 max-h-48 overflow-y-auto custom-scroll divide-y divide-slate-100 dark:divide-white/5">
             {playlists.map((pl) => {
               const alreadyIn = pl.tracks.some((t) => t.videoId === track.videoId);
               return (
@@ -68,18 +68,18 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
                     onAddTrackToPlaylist(pl.id, track);
                     onClose();
                   }}
-                  className="w-full min-h-[48px] px-3 py-2.5 flex items-center justify-between text-left hover:bg-white/5 rounded-xl transition-colors cursor-pointer"
+                  className="w-full min-h-[48px] px-3 py-2.5 flex items-center justify-between text-left hover:bg-slate-100 dark:hover:bg-white/5 rounded-xl transition-colors cursor-pointer"
                 >
                   <div className="flex items-center gap-3 min-w-0">
-                    <ListMusic className="w-4 h-4 text-amber-400 shrink-0" />
+                    <ListMusic className="w-4 h-4 text-amber-500 dark:text-amber-400 shrink-0" />
                     <div className="min-w-0">
-                      <p className="text-sm font-medium text-slate-100 truncate">{pl.name}</p>
-                      <p className="text-xs text-slate-400">
+                      <p className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate">{pl.name}</p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
                         {pl.tracks.length} {pl.tracks.length === 1 ? 'pista' : 'pistas'}
                       </p>
                     </div>
                   </div>
-                  <span className="text-xs font-medium text-amber-400 flex items-center gap-1 shrink-0 ml-2">
+                  <span className="text-xs font-medium text-amber-600 dark:text-amber-400 flex items-center gap-1 shrink-0 ml-2">
                     {alreadyIn ? (
                       <>
                         <Check className="w-4 h-4" />
@@ -101,14 +101,14 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
         {!showNewForm ? (
           <button
             onClick={() => setShowNewForm(true)}
-            className="mt-4 w-full min-h-[44px] rounded-xl border border-white/10 hover:border-amber-500/40 text-xs font-medium text-slate-200 flex items-center justify-center gap-2 transition-colors cursor-pointer"
+            className="mt-4 w-full min-h-[44px] rounded-xl border border-slate-200 dark:border-white/10 hover:border-amber-500/50 text-xs font-medium text-slate-700 dark:text-slate-200 flex items-center justify-center gap-2 transition-colors cursor-pointer"
           >
-            <FolderPlus className="w-4 h-4 text-amber-400" />
+            <FolderPlus className="w-4 h-4 text-amber-500 dark:text-amber-400" />
             <span>Crear nueva lista de reproducción</span>
           </button>
         ) : (
-          <form onSubmit={handleCreate} className="mt-4 pt-3 border-t border-white/10 space-y-3">
-            <label className="block text-xs font-medium text-slate-300">
+          <form onSubmit={handleCreate} className="mt-4 pt-3 border-t border-slate-200 dark:border-white/10 space-y-3">
+            <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
               Nombre de la nueva lista
             </label>
             <div className="flex items-center gap-2">
@@ -117,7 +117,7 @@ export const AddToPlaylistModal: React.FC<AddToPlaylistModalProps> = ({
                 value={newPlaylistName}
                 onChange={(e) => setNewPlaylistName(e.target.value)}
                 placeholder="Ej. Podcasts Nocturnos, Deep Focus..."
-                className="flex-1 min-h-[44px] px-3.5 rounded-xl bg-[#090A0F] border border-white/10 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500"
+                className="flex-1 min-h-[44px] px-3.5 rounded-xl bg-slate-50 dark:bg-[#090A0F] border border-slate-200 dark:border-white/10 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:border-amber-500"
                 autoFocus
               />
               <button
